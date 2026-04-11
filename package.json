@@ -1,0 +1,17 @@
+{
+  "name": "ownwa",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev --workspace @ownwa/server\" \"npm run dev --workspace @ownwa/client\"",
+    "build": "npm run build --workspace @ownwa/server && npm run build --workspace @ownwa/client",
+    "test": "npm run test --workspace @ownwa/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}

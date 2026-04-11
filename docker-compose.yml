@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ownwa
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ownwa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/ownwa
+      SESSION_SECRET: ownwa-local-session-secret
+      ARCHIVE_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+      BLOB_DRIVER: local
+      BLOB_ROOT: /app/archive-blobs
+      MAX_IMPORT_BYTES: 10737418240
+      UPLOAD_TMP_DIR: /app/tmp/uploads
+      NODE_OPTIONS: --max-old-space-size=6144
+      PORT: 4000
+      APP_ORIGIN: http://localhost:8080
+    ports:
+      - "4000:4000"
+    volumes:
+      - archive-blobs:/app/archive-blobs
+
+  client:
+    build:
+      context: .
+      dockerfile: apps/client/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres-data:
+  archive-blobs:

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>OwnWA | Digital Curator</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Manrope:wght@700;800&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                "on-background": "#191c1e",
+                "error": "#ba1a1a",
+                "background": "#f7f9fc",
+                "tertiary-fixed": "#ffdbcf",
+                "outline-variant": "#bbcbb9",
+                "on-tertiary-fixed": "#380d00",
+                "surface-container-highest": "#e0e3e6",
+                "on-secondary": "#ffffff",
+                "on-tertiary": "#ffffff",
+                "on-secondary-fixed": "#00201c",
+                "inverse-primary": "#3de273",
+                "primary": "#006d2f",
+                "secondary-container": "#a5ede0",
+                "primary-fixed": "#66ff8e",
+                "inverse-surface": "#2d3133",
+                "on-primary": "#ffffff",
+                "on-error": "#ffffff",
+                "tertiary-container": "#ffa07e",
+                "error-container": "#ffdad6",
+                "surface-variant": "#e0e3e6",
+                "secondary": "#1c695f",
+                "surface-container-lowest": "#ffffff",
+                "tertiary-fixed-dim": "#ffb59b",
+                "primary-fixed-dim": "#3de273",
+                "on-surface-variant": "#3c4a3d",
+                "surface": "#f7f9fc",
+                "secondary-fixed-dim": "#8cd4c7",
+                "surface-container": "#eceef1",
+                "primary-container": "#25d366",
+                "on-error-container": "#93000a",
+                "on-surface": "#191c1e",
+                "surface-tint": "#006d2f",
+                "surface-bright": "#f7f9fc",
+                "secondary-fixed": "#a8f0e3",
+                "surface-container-high": "#e6e8eb",
+                "surface-dim": "#d8dadd",
+                "outline": "#6c7b6b",
+                "on-secondary-container": "#226e63",
+                "on-tertiary-container": "#78351b",
+                "on-primary-container": "#005523",
+                "surface-container-low": "#f2f4f7",
+                "on-secondary-fixed-variant": "#005047",
+                "tertiary": "#93492e",
+                "on-primary-fixed-variant": "#005322",
+                "inverse-on-surface": "#eff1f4",
+                "on-primary-fixed": "#002109",
+                "on-tertiary-fixed-variant": "#763319"
+            },
+            "borderRadius": {
+                "DEFAULT": "0.25rem",
+                "lg": "0.5rem",
+                "xl": "0.75rem",
+                "full": "9999px"
+            },
+            "fontFamily": {
+                "headline": ["Manrope"],
+                "body": ["Inter"],
+                "label": ["Inter"]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        body { font-family: 'Inter', sans-serif; }
+        .font-headline { font-family: 'Manrope', sans-serif; }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(12px);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e0e3e6; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-surface text-on-surface overflow-hidden">
+<div class="flex h-screen w-full">
+<aside class="flex flex-col h-screen w-[360px] bg-surface-container border-none shrink-0 transition-all">
+<header class="px-5 pt-6 pb-4 flex flex-col gap-4">
+<div class="flex items-center justify-between">
+<div>
+<h1 class="font-headline font-extrabold text-2xl tracking-tight text-on-background">OwnWA</h1>
+<p class="text-on-surface/60 text-[10px] font-medium uppercase tracking-widest mt-0.5">Digital Curator</p>
+</div>
+<img alt="User profile settings" class="w-9 h-9 rounded-full object-cover" data-alt="Close up portrait of a professional man with a kind expression and neat hair in a brightly lit modern office setting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBS05mQIa6qGcCWY2KZ5uemkzZERDXxUXFPVsrr3iHvI2yBhgpJgXs5TTyv8-05N2IT3WCNopjpmXJncbgJ9pn9Y9iLEW086pVkrlwPRdcUTbgqB2UcPRaKsOzQx9MtUp8bD_Io3mvLHipeeyrde-Ds2WkBBn9ynSesA93jsy-pHp0H9KzkPlJiErlEPhW5gegoFl1dTuq2E7Y0c8uHE8Mh6XO6lrutunVjZRefKVr6X1TvgNF_5_8BhtdeSA44rc3wqVqulzIOz5-L"/>
+</div>
+<button class="w-full py-3.5 bg-gradient-to-r from-primary to-primary-container text-white font-headline font-bold text-xs tracking-widest rounded-xl shadow-[0_4px_12px_-4px_rgba(0,109,47,0.3)] transition-all duration-300 active:scale-[0.98] hover:brightness-105">
+                IMPORT TO OWNWA
+            </button>
+<div class="relative group">
+<span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface/40 text-[20px] group-focus-within:text-primary transition-colors">search</span>
+<input class="w-full bg-surface-bright border-none h-10 pl-11 pr-4 rounded-full text-sm focus:ring-2 focus:ring-primary/20 placeholder:text-on-surface/40 transition-all" placeholder="Search conversations..." type="text"/>
+</div>
+</header>
+<nav class="flex-1 overflow-y-auto custom-scrollbar px-2 pb-4">
+<div class="flex gap-1 mb-4 px-3 overflow-x-auto no-scrollbar">
+<button class="px-3 py-1.5 bg-surface-container-highest text-on-background font-semibold text-[11px] rounded-full transition-all duration-200 whitespace-nowrap">Chats</button>
+<button class="px-3 py-1.5 text-on-surface/60 hover:bg-surface-container-highest/50 text-[11px] rounded-full transition-all duration-200 whitespace-nowrap">Groups</button>
+<button class="px-3 py-1.5 text-on-surface/60 hover:bg-surface-container-highest/50 text-[11px] rounded-full transition-all duration-200 whitespace-nowrap">Status</button>
+<button class="px-3 py-1.5 text-on-surface/60 hover:bg-surface-container-highest/50 text-[11px] rounded-full transition-all duration-200 whitespace-nowrap">Archived</button>
+</div>
+<div class="space-y-0.5">
+<div class="flex items-center gap-3 p-3 rounded-xl bg-surface-container-highest text-on-background transition-all duration-200 cursor-pointer group active:scale-[0.99]">
+<div class="relative shrink-0">
+<img alt="Contact" class="w-12 h-12 rounded-full object-cover" data-alt="Vibrant portrait of a woman with curly hair laughing, outdoors in soft evening sunlight with warm tones" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAtOi4AJdrDDn0VqpjCMQp0iKN3EwrOc5PNLPARmBtnCq0_i-Uift_BGP2J2Hi8Gtle6Q9xPKm9MiDU-aDmIUhllzs1sMuxanqYY9QlJdkp8lfwOz_eYBBrKADM5KiN0jJUVmu-63oB8uxx7UNl85MBvvdi-7Ip2fhz2hvSWWoOVpRSmBzM91SUTE1VaNJVS8bY-TMsn5PGgIg_v16ijPBnVStxCWjKAA0B1mdhivQMS872ha2dBeIkAyi9f4zZibOyXYhyB-_U8wNw"/>
+<div class="absolute bottom-0 right-0 w-3 h-3 bg-primary border-2 border-surface-container-highest rounded-full"></div>
+</div>
+<div class="flex-1 min-w-0">
+<div class="flex justify-between items-baseline mb-0">
+<h3 class="font-bold text-[14px] truncate">Julianne Moore</h3>
+<span class="text-[10px] font-medium text-primary">12:45 PM</span>
+</div>
+<div class="flex justify-between items-center">
+<p class="text-[13px] text-on-surface/70 truncate font-medium">The editorial layout is looking incredible!</p>
+<span class="bg-primary text-white text-[9px] font-bold h-4.5 min-w-[18px] flex items-center justify-center rounded-full px-1 ml-2">2</span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-3 p-3 rounded-xl hover:bg-surface-container-high/50 text-on-surface/80 transition-all duration-200 cursor-pointer active:scale-[0.99]">
+<div class="shrink-0">
+<img alt="Contact" class="w-12 h-12 rounded-full object-cover" data-alt="Close-up of a man with a beard and glasses looking thoughtfully at the camera, neutral studio background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDej2gvIIG27DahBMYClbnDZodBvTQ5ezY24hUUtXpO0t4DzTdq98-ScElqUkJaikr0WTqnJAT2Ya4nFaOsL_Fqn7VGxqZ4H-mNsGbX3XNncvOWx0KuZaPliJMK7BLFbcKI7AbZ_HqH0d4YuEJiRs29Hjrfqfpws_cW2-Qf_Pe21PbdVRe5wL9tlYe0q0CyqI6OJ7xspYAZkXRZD8CRL3Eur_JDC_ASb7fKIPqhVuADZEMiyLaxSouO4uGZFUCJkDpx4kF9e4G7I4qe"/>
+</div>
+<div class="flex-1 min-w-0">
+<div class="flex justify-between items-baseline mb-0">
+<h3 class="font-semibold text-[14px] truncate">Sebastian Vitter</h3>
+<span class="text-[10px] text-on-surface/40">11:20 AM</span>
+</div>
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[14px] text-on-surface/40">videocam</span>
+<p class="text-[13px] text-on-surface/50 truncate">Video attachment</p>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-3 p-3 rounded-xl hover:bg-surface-container-high/50 text-on-surface/80 transition-all duration-200 cursor-pointer active:scale-[0.99]">
+<div class="shrink-0">
+<div class="w-12 h-12 rounded-full bg-secondary-container flex items-center justify-center text-on-secondary-container font-headline font-bold text-base">DG</div>
+</div>
+<div class="flex-1 min-w-0">
+<div class="flex justify-between items-baseline mb-0">
+<h3 class="font-semibold text-[14px] truncate">Design Guild</h3>
+<span class="text-[10px] text-on-surface/40">Yesterday</span>
+</div>
+<p class="text-[13px] text-on-surface/50 truncate">Alex: Let's use Manrope for headers.</p>
+</div>
+</div>
+</div>
+</nav>
+</aside>
+<main class="flex-1 flex flex-col bg-surface overflow-hidden relative">
+<header class="h-[72px] shrink-0 px-6 flex items-center justify-between glass-panel z-10 border-b border-outline-variant/10">
+<div class="flex items-center gap-3">
+<div class="relative">
+<img alt="Julianne Moore" class="w-10 h-10 rounded-full object-cover" data-alt="Close up portrait of a woman with dark hair and bright eyes, high-fashion aesthetic with soft natural light" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDp87MB9hRgz3LQ2oSqBHLJ6q5TPU22qXdnOWJ5UN9-Til-_7ULox2xdLyrzMMPCgTysUfQdLCO7HS271n3tHivcqn0BL_UGRYPClIxkOsf4yyoZyhMjrf9wquUw-NzjInsRanIQrB6lsqSMskM7wSLbTi4UtooLsKsFVI9Hl2y4UgukRcQUNxgPb089q-PAmHVbUrEtVsComoZvgkwLuq7fNIYXHKX-yqIQS6U99GNzSpdWQR_gwvhgvOUpPd-jqrC60fZhoWyWv-e"/>
+</div>
+<div>
+<h2 class="font-headline font-bold text-base text-on-background leading-tight">Julianne Moore</h2>
+<p class="text-[11px] font-medium text-on-surface/40 uppercase tracking-widest">Digital Curator</p>
+</div>
+</div>
+<div class="flex items-center gap-1">
+<button class="p-2.5 text-on-surface/70 hover:bg-on-surface/5 rounded-full transition-colors">
+<span class="material-symbols-outlined text-[20px]">search</span>
+</button>
+<button class="p-2.5 text-on-surface/70 hover:bg-on-surface/5 rounded-full transition-colors">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</header>
+<section class="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-5 flex flex-col">
+<div class="flex justify-center">
+<span class="px-3 py-1 rounded-full bg-surface-container-low text-[10px] font-bold uppercase tracking-[0.15em] text-on-surface/40">Today</span>
+</div>
+<div class="flex justify-center">
+<div class="bg-surface-container-high/40 text-on-surface/50 text-[11px] px-4 py-1 rounded-md flex items-center gap-2">
+<span class="material-symbols-outlined text-[14px]">lock</span>
+                    Messages are end-to-end encrypted with OwnWA.
+                </div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%]">
+<div class="bg-surface-container-lowest text-on-surface px-4 py-3 rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-[0_2px_8px_rgba(0,0,0,0.02)]">
+<p class="text-[14px] leading-relaxed">Hey there! I just finished reviewing the curated style guide. The "no-line" approach for the sidebar really gives the interface room to breathe. 🌿</p>
+<p class="text-[9px] text-on-surface/40 mt-1 font-medium text-right">12:30 PM</p>
+</div>
+</div>
+<div class="flex justify-center">
+<div class="bg-surface-container-high/30 text-on-surface/40 text-[10px] px-3 py-0.5 rounded-full italic">
+                    Julianne Moore changed the group description
+                </div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%] self-end items-end">
+<div class="bg-primary-container text-on-primary-container px-4 py-3 rounded-tl-xl rounded-bl-xl rounded-br-xl shadow-[0_4px_12px_-4px_rgba(37,211,102,0.15)]">
+<p class="text-[14px] leading-relaxed">That's exactly what we were aiming for! Did you see the new 'Import' button gradient?</p>
+<div class="flex items-center justify-end gap-1 mt-0.5">
+<p class="text-[9px] opacity-70 font-medium">12:32 PM</p>
+<span class="material-symbols-outlined text-[13px] font-bold" style="font-variation-settings: 'FILL' 1;">done_all</span>
+</div>
+</div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%] self-end items-end">
+<div class="rounded-tl-xl rounded-bl-xl rounded-br-xl overflow-hidden shadow-lg border-[3px] border-primary-container">
+<div class="relative group cursor-pointer">
+<img alt="Interface Design" class="w-full h-auto max-h-[240px] object-cover" data-alt="Clean minimalist dashboard UI design displayed on a sleek laptop screen, high contrast editorial aesthetic with white and forest green accents" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCv5f05ungiLw4fD9zBQ_knHdM2NFT7li1ukPlte2gkohlRXDjOl8LX69YKT3Pmey6G5_sObJCdyi0vSgCI6FgpNrce2RJYyUI3zDWk13gxsgT3vVbVXj4I-r0A8-tMhasbDfTrtmnpMi5TzJ2B86gZxCRZ22u6b2qBmQXf3TGAAjSG2UCN8BZDK24y76rPpcFF_IiQAb5QzBKH27_kujb7v1-klNeNZqehlCwP90X3x9bSj2qEcrcgCLn9XlavZqxImudXEjvvF6w1"/>
+<div class="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+<span class="material-symbols-outlined text-white text-3xl">zoom_in</span>
+</div>
+</div>
+</div>
+<div class="flex items-center justify-end gap-1 mt-1">
+<p class="text-[9px] text-on-surface/40 font-medium">12:33 PM</p>
+<span class="material-symbols-outlined text-[13px] text-primary font-bold" style="font-variation-settings: 'FILL' 1;">done_all</span>
+</div>
+</div>
+<div class="flex justify-center">
+<div class="bg-surface-container-high/30 text-on-surface/40 text-[10px] px-3 py-0.5 rounded-full italic">
+                    Sebastian Vitter was added to the conversation
+                </div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%]">
+<div class="bg-surface-container-lowest text-on-surface p-1 rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-[0_2px_8px_rgba(0,0,0,0.02)] overflow-hidden">
+<div class="relative aspect-video rounded-lg overflow-hidden bg-on-background flex items-center justify-center">
+<img alt="Video Thumbnail" class="absolute inset-0 w-full h-full object-cover opacity-60" data-alt="Cinematic shot of high-tech server room with glowing green lights and digital stream overlays, futuristic atmosphere" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBwJO2dUIJ1soXGbQvk91y80hian-u-TiOyRYOAuSeRQRe2yl3cXh4P2FKEHdVdZj2w9jyZy0yqlvzlTY3uc1L5_cBKs4wa8sOhfVjp6tU-W9qNB0gMjOYtpGVd23UEQ7B6NQ3e9lGClOp4Gz0PsQzeC8jZqYndBvOH1wjYT3txxjJHCYYJdBCJezE1up8NKnEgpXq_ZZOuPzhY6kP3te9iI098PBhgBSPFHAwDzrwlIoMfNgoR5I9hTWbsNMihTlUzefqlTGCaPIA6"/>
+<button class="z-10 w-12 h-12 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center hover:bg-white/30 transition-all active:scale-90">
+<span class="material-symbols-outlined text-white text-2xl" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+</button>
+<span class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/60 rounded text-[9px] font-bold text-white tracking-widest">0:45</span>
+</div>
+<div class="px-3 py-2">
+<p class="text-[12px] font-medium">UI_Motion_Concepts_Final.mp4</p>
+<p class="text-[9px] text-on-surface/40 mt-0.5">12:35 PM</p>
+</div>
+</div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%] self-end items-end">
+<div class="w-24 h-24 flex items-center justify-center p-2 rounded-xl bg-surface-container-low/30">
+<span class="material-symbols-outlined text-[64px] text-primary/80" style="font-variation-settings: 'FILL' 1;">fluid</span>
+</div>
+<div class="flex items-center justify-end gap-1 mt-1">
+<p class="text-[9px] text-on-surface/40 font-medium">12:40 PM</p>
+<span class="material-symbols-outlined text-[13px] text-primary font-bold" style="font-variation-settings: 'FILL' 1;">done_all</span>
+</div>
+</div>
+<div class="flex flex-col gap-1 max-w-[80%]">
+<div class="bg-surface-container-lowest text-on-surface px-4 py-3 rounded-tr-xl rounded-br-xl rounded-bl-xl shadow-[0_2px_8px_rgba(0,0,0,0.02)]">
+<p class="text-[14px] leading-relaxed font-semibold text-primary">The editorial layout is looking incredible!</p>
+<p class="text-[9px] text-on-surface/40 mt-1 font-medium text-right">12:45 PM</p>
+</div>
+</div>
+</section>
+<footer class="h-20 shrink-0 px-6 flex items-center gap-3 bg-surface-container-lowest/50 backdrop-blur-sm relative border-t border-outline-variant/10">
+<button class="p-2.5 text-on-surface/60 hover:bg-on-surface/5 rounded-full transition-all">
+<span class="material-symbols-outlined text-[24px]">add</span>
+</button>
+<div class="flex-1 relative">
+<input class="w-full bg-surface-container-high/40 border-none h-11 px-5 rounded-full text-[14px] focus:ring-0 focus:bg-surface-container-high/70 transition-all placeholder:text-on-surface/30" placeholder="Type a message..." type="text"/>
+</div>
+<div class="flex items-center gap-1">
+<button class="p-2.5 text-on-surface/60 hover:bg-on-surface/5 rounded-full transition-all">
+<span class="material-symbols-outlined text-[24px]">mood</span>
+</button>
+<button class="w-11 h-11 bg-primary text-white rounded-full flex items-center justify-center shadow-md shadow-primary/20 hover:scale-105 active:scale-95 transition-all">
+<span class="material-symbols-outlined text-[22px]" style="font-variation-settings: 'FILL' 1;">send</span>
+</button>
+</div>
+</footer>
+</main>
+</div>
+</body></html>

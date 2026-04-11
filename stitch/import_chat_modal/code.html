@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-background": "#191c1e",
+                    "error": "#ba1a1a",
+                    "background": "#f7f9fc",
+                    "tertiary-fixed": "#ffdbcf",
+                    "outline-variant": "#bbcbb9",
+                    "on-tertiary-fixed": "#380d00",
+                    "surface-container-highest": "#e0e3e6",
+                    "on-secondary": "#ffffff",
+                    "on-tertiary": "#ffffff",
+                    "on-secondary-fixed": "#00201c",
+                    "inverse-primary": "#3de273",
+                    "primary": "#006d2f",
+                    "secondary-container": "#a5ede0",
+                    "primary-fixed": "#66ff8e",
+                    "inverse-surface": "#2d3133",
+                    "on-primary": "#ffffff",
+                    "on-error": "#ffffff",
+                    "tertiary-container": "#ffa07e",
+                    "error-container": "#ffdad6",
+                    "surface-variant": "#e0e3e6",
+                    "secondary": "#1c695f",
+                    "surface-container-lowest": "#ffffff",
+                    "tertiary-fixed-dim": "#ffb59b",
+                    "primary-fixed-dim": "#3de273",
+                    "on-surface-variant": "#3c4a3d",
+                    "surface": "#f7f9fc",
+                    "secondary-fixed-dim": "#8cd4c7",
+                    "surface-container": "#eceef1",
+                    "primary-container": "#25d366",
+                    "on-error-container": "#93000a",
+                    "on-surface": "#191c1e",
+                    "surface-tint": "#006d2f",
+                    "surface-bright": "#f7f9fc",
+                    "secondary-fixed": "#a8f0e3",
+                    "surface-container-high": "#e6e8eb",
+                    "surface-dim": "#d8dadd",
+                    "outline": "#6c7b6b",
+                    "on-secondary-container": "#226e63",
+                    "on-tertiary-container": "#78351b",
+                    "on-primary-container": "#005523",
+                    "surface-container-low": "#f2f4f7",
+                    "on-secondary-fixed-variant": "#005047",
+                    "tertiary": "#93492e",
+                    "on-primary-fixed-variant": "#005322",
+                    "inverse-on-surface": "#eff1f4",
+                    "on-primary-fixed": "#002109",
+                    "on-tertiary-fixed-variant": "#763319"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "fontFamily": {
+                    "headline": ["Manrope"],
+                    "body": ["Inter"],
+                    "label": ["Inter"]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .signature-gradient {
+            background: linear-gradient(135deg, #006d2f 0%, #25d366 100%);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #e0e3e6;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="bg-surface font-body text-on-surface overflow-hidden">
+<!-- Background Layer (The Main Interface Dimmed) -->
+<div class="flex h-screen w-full blur-[2px] brightness-75 select-none pointer-events-none">
+<!-- SideNavBar Component -->
+<aside class="h-full w-[350px] flex flex-col bg-[#eceef1] dark:bg-slate-800">
+<div class="p-6">
+<div class="flex items-center justify-between mb-8">
+<span class="font-headline font-bold text-[#191c1e] dark:text-slate-100 text-xl">The Fluid Dialogue</span>
+<img alt="User profile settings" class="w-10 h-10 rounded-full bg-surface-container-highest" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDrCXRcCdvyDffFohCXoxb8dwfVBLNYo_ay-AD7hvJDcK9IBzRNaimkSOYQcYJqyPth95GPSjAYb4t3ii-5Q_23QMF-MfnsFj4KKE-kr7AfI4qmg-2B0sSjF6n6GEK6MshldYKTcSpZKktvECMxjoTgweQ7JkzPSsQDN4C2X8MfRyRxc9X4lV7Cfe5-1lHHHKgNv5U7F_TCGx3Zp6Q6UfJssU07aDg6yDEYGfoLgZu7wCRfX7RW0iP9nhQq65QRivscWq0msT40u90V"/>
+</div>
+<button class="w-full py-4 px-6 signature-gradient text-white rounded-xl font-headline font-bold text-sm tracking-wider shadow-lg shadow-primary/20 mb-8">
+                    IMPORT
+                </button>
+<nav class="space-y-1">
+<div class="flex items-center gap-4 p-4 bg-[#e0e3e6] dark:bg-slate-700 text-[#191c1e] dark:text-white font-semibold rounded-xl scale-[0.98]">
+<span class="material-symbols-outlined">chat</span>
+<span class="font-label text-sm">Chats</span>
+</div>
+<div class="flex items-center gap-4 p-4 text-[#191c1e]/60 dark:text-slate-400 hover:bg-[#e0e3e6]/50 transition-all rounded-xl">
+<span class="material-symbols-outlined">group</span>
+<span class="font-label text-sm">Groups</span>
+</div>
+<div class="flex items-center gap-4 p-4 text-[#191c1e]/60 dark:text-slate-400 hover:bg-[#e0e3e6]/50 transition-all rounded-xl">
+<span class="material-symbols-outlined">sync</span>
+<span class="font-label text-sm">Status</span>
+</div>
+<div class="flex items-center gap-4 p-4 text-[#191c1e]/60 dark:text-slate-400 hover:bg-[#e0e3e6]/50 transition-all rounded-xl">
+<span class="material-symbols-outlined">archive</span>
+<span class="font-label text-sm">Archived</span>
+</div>
+</nav>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col bg-[#f7f9fc]">
+<header class="flex justify-between items-center w-full px-6 py-3 bg-[#f7f9fc]">
+<div class="flex items-center gap-4 bg-surface-container-highest rounded-full px-4 py-2 w-72">
+<span class="material-symbols-outlined text-on-surface-variant">search</span>
+<span class="text-sm text-on-surface-variant/60">Search conversations...</span>
+</div>
+<div class="flex items-center gap-6">
+<span class="material-symbols-outlined text-[#191c1e]/70">videocam</span>
+<span class="material-symbols-outlined text-[#191c1e]/70">call</span>
+<span class="material-symbols-outlined text-[#191c1e]/70">more_vert</span>
+</div>
+</header>
+<!-- Empty State Mockup -->
+<div class="flex-1 flex flex-col items-center justify-center p-12 text-center">
+<div class="w-24 h-24 bg-surface-container rounded-full flex items-center justify-center mb-6">
+<span class="material-symbols-outlined text-4xl text-outline">forum</span>
+</div>
+<h2 class="font-headline text-2xl font-bold mb-2">Select a dialogue</h2>
+<p class="text-on-surface-variant max-w-xs">Choose a conversation from the sidebar or import your history to begin.</p>
+</div>
+</main>
+</div>
+<!-- Modal Overlay -->
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-on-background/10 backdrop-blur-sm p-4">
+<!-- Modal Container -->
+<div class="bg-surface-container-lowest w-full max-w-2xl rounded-[2rem] shadow-2xl overflow-hidden flex flex-col max-h-[921px]">
+<!-- Modal Header -->
+<div class="p-8 pb-4">
+<h1 class="font-headline text-3xl font-extrabold text-on-background tracking-tight mb-2">Import Chat History</h1>
+<p class="text-on-surface-variant font-body leading-relaxed">
+                    Preserve your digital legacy by bringing your WhatsApp conversations into <span class="font-semibold text-primary">The Fluid Dialogue</span> ecosystem.
+                </p>
+</div>
+<div class="flex-1 overflow-y-auto custom-scrollbar p-8 pt-4">
+<!-- Instructions Bento -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+<div class="bg-surface-container-low p-5 rounded-2xl">
+<div class="flex items-center gap-3 mb-3">
+<div class="w-8 h-8 rounded-full bg-secondary-container flex items-center justify-center">
+<span class="text-xs font-bold text-on-secondary-container">1</span>
+</div>
+<h3 class="font-headline font-bold text-sm">Export from WhatsApp</h3>
+</div>
+<p class="text-xs text-on-surface-variant leading-relaxed">
+                            Open the chat in WhatsApp, tap <span class="font-medium">More</span>, then <span class="font-medium">Export Chat</span>. Choose "Without Media" for faster processing.
+                        </p>
+</div>
+<div class="bg-surface-container-low p-5 rounded-2xl">
+<div class="flex items-center gap-3 mb-3">
+<div class="w-8 h-8 rounded-full bg-tertiary-fixed flex items-center justify-center">
+<span class="text-xs font-bold text-on-tertiary-fixed">2</span>
+</div>
+<h3 class="font-headline font-bold text-sm">Upload File</h3>
+</div>
+<p class="text-xs text-on-surface-variant leading-relaxed">
+                            Drag and drop the generated <span class="font-medium">.txt</span> or <span class="font-medium">.zip</span> archive into the dropzone below to begin curation.
+                        </p>
+</div>
+</div>
+<!-- Dropzone Area -->
+<div class="relative group cursor-pointer">
+<div class="absolute inset-0 signature-gradient opacity-0 group-hover:opacity-5 transition-opacity rounded-3xl"></div>
+<div class="border-2 border-dashed border-outline-variant/40 rounded-3xl p-12 flex flex-col items-center justify-center transition-all group-hover:border-primary/40 bg-surface-container-low/30">
+<div class="w-20 h-20 rounded-full bg-surface-container-high flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
+<span class="material-symbols-outlined text-4xl text-primary" data-weight="fill">upload_file</span>
+</div>
+<h4 class="font-headline font-bold text-lg mb-1">Drag and drop files</h4>
+<p class="text-sm text-on-surface-variant mb-6 text-center">Supports WhatsApp history .txt or compressed .zip archives</p>
+<div class="flex items-center gap-3">
+<button class="px-8 py-3 bg-on-background text-surface-container-lowest rounded-full font-label text-sm font-semibold hover:bg-on-background/90 transition-colors">
+                                Browse Files
+                            </button>
+</div>
+</div>
+</div>
+<!-- Privacy Note -->
+<div class="mt-8 flex items-start gap-4 p-4 rounded-xl border border-outline-variant/10">
+<span class="material-symbols-outlined text-tertiary">security</span>
+<div>
+<h5 class="text-xs font-bold uppercase tracking-widest text-tertiary mb-1">Privacy First</h5>
+<p class="text-xs text-on-surface-variant/80 leading-relaxed">
+                            Files are processed locally within your browser context. No personal messages or media are stored on our servers during the import process.
+                        </p>
+</div>
+</div>
+</div>
+<!-- Modal Actions -->
+<div class="p-8 pt-4 bg-surface-container-low/50 flex items-center justify-end gap-4">
+<button class="px-6 py-3 text-on-surface/60 font-label font-semibold text-sm hover:text-on-surface transition-colors">
+                    Cancel
+                </button>
+<button class="px-10 py-3 signature-gradient text-white rounded-full font-headline font-bold text-sm tracking-wider shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                    START IMPORT
+                </button>
+</div>
+</div>
+</div>
+<!-- Decoration/Visual Elements (Editorial Flair) -->
+<div class="fixed bottom-10 right-10 -z-10 opacity-20 pointer-events-none">
+<div class="w-[500px] h-[500px] signature-gradient rounded-full blur-[120px]"></div>
+</div>
+</body></html>
