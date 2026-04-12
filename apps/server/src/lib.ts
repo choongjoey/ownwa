@@ -30,6 +30,10 @@ export interface AppConfig {
   encryptionKey: Buffer;
   maxImportBytes: number;
   uploadTmpDir: string;
+  importWorkerIntervalMs: number;
+  importWorkerBatchSize: number;
+  largeImportThresholdBytes: number;
+  importProgressStepPercent: number;
   blobDriver: BlobDriverKind;
   blobRoot: string;
   s3Region?: string;
@@ -283,6 +287,10 @@ const ENCRYPTED_BLOB_VERSION = 1;
 const ENCRYPTED_BLOB_IV_LENGTH = 12;
 const ENCRYPTED_BLOB_TAG_LENGTH = 16;
 const ENCRYPTED_BLOB_HEADER_LENGTH = 1 + ENCRYPTED_BLOB_IV_LENGTH;
+const DEFAULT_LARGE_IMPORT_THRESHOLD_BYTES = 2 * 1024 ** 3;
+const DEFAULT_IMPORT_WORKER_INTERVAL_MS = 2000;
+const DEFAULT_IMPORT_WORKER_BATCH_SIZE = 10;
+const DEFAULT_IMPORT_PROGRESS_STEP_PERCENT = 5;
 
 type Queryable = Pool | PoolClient;
 
@@ -413,14 +421,35 @@ export function createConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     env.ARCHIVE_ENCRYPTION_KEY?.trim() ||
     Buffer.from("development-encryption-key-12345").toString("base64");
   const encryptionKey = parseEncryptionKey(rawKey);
+  const maxImportBytes = clampPositiveInteger(Number(env.MAX_IMPORT_BYTES || 10737418240), 10737418240);
+  const importWorkerIntervalMs = clampPositiveInteger(
+    Number(env.IMPORT_WORKER_INTERVAL_MS || DEFAULT_IMPORT_WORKER_INTERVAL_MS),
+    DEFAULT_IMPORT_WORKER_INTERVAL_MS
+  );
+  const importWorkerBatchSize = clampPositiveInteger(
+    Number(env.IMPORT_WORKER_BATCH_SIZE || DEFAULT_IMPORT_WORKER_BATCH_SIZE),
+    DEFAULT_IMPORT_WORKER_BATCH_SIZE
+  );
+  const largeImportThresholdBytes = clampPositiveInteger(
+    Number(env.LARGE_IMPORT_THRESHOLD_BYTES || DEFAULT_LARGE_IMPORT_THRESHOLD_BYTES),
+    DEFAULT_LARGE_IMPORT_THRESHOLD_BYTES
+  );
+  const importProgressStepPercent = clampPositiveInteger(
+    Number(env.IMPORT_PROGRESS_STEP_PERCENT || DEFAULT_IMPORT_PROGRESS_STEP_PERCENT),
+    DEFAULT_IMPORT_PROGRESS_STEP_PERCENT
+  );
   return {
     databaseUrl: env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/ownwa",
     port: Number(env.PORT || 4000),
     sessionSecret,
     appOrigin: env.APP_ORIGIN || "http://localhost:5173",
     encryptionKey,
-    maxImportBytes: Number(env.MAX_IMPORT_BYTES || 10737418240),
+    maxImportBytes,
     uploadTmpDir: env.UPLOAD_TMP_DIR ? path.resolve(env.UPLOAD_TMP_DIR) : path.resolve(process.cwd(), "tmp/uploads"),
+    importWorkerIntervalMs,
+    importWorkerBatchSize,
+    largeImportThresholdBytes,
+    importProgressStepPercent,
     blobDriver: env.BLOB_DRIVER === "s3" ? "s3" : "local",
     blobRoot: env.BLOB_ROOT ? path.resolve(env.BLOB_ROOT) : path.resolve(process.cwd(), "archive-blobs"),
     s3Region: env.S3_REGION,
@@ -495,6 +524,13 @@ function parseJson<T>(value: string | null | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function clampPositiveInteger(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value < 1) {
+    return fallback;
+  }
+  return Math.floor(value);
 }
 
 function toIso(value: Date | string | null): string | null {
@@ -594,6 +630,20 @@ function clampOffset(value: number, maxOffset: number): number {
     return maxOffset;
   }
   return Math.max(0, Math.min(Math.floor(value), maxOffset));
+}
+
+function clampImportProgressPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function createImportProgress(task: string, percent: number): ImportProgress {
+  return {
+    task,
+    percent: clampImportProgressPercent(percent)
+  };
 }
 
 function buildMessageFingerprint(message: ParsedMessage): string {
@@ -1613,33 +1663,29 @@ export class ArchiveServices {
     };
   }
 
-  async createImport(
-    ownerId: string,
-    fileName: string,
-    content: Buffer,
-    options: CreateImportOptions = {}
-  ) {
-    const fileSha256 = sha256Hex(content);
+  private async assertImportDoesNotExist(ownerId: string, fileSha256: string): Promise<void> {
     const existing = await fetchOne<ImportRow>(
       this.options.db,
       "SELECT * FROM imports WHERE owner_id = $1 AND file_sha256 = $2",
       [ownerId, fileSha256]
     );
-    if (existing) {
-      const error = new Error("This export has already been imported");
-      (error as Error & { existingImportId?: string }).existingImportId = existing.id;
-      throw error;
+    if (!existing) {
+      return;
     }
+    const error = new Error("This export has already been imported");
+    (error as Error & { existingImportId?: string }).existingImportId = existing.id;
+    throw error;
+  }
 
-    const id = randomUUID();
-    const sourceBlob = await this.options.storage.put(
-      `imports/${ownerId}/${id}.bin`,
-      encryptBytes(content, this.options.config.encryptionKey),
-      {
-        kind: "source",
-        fileName: path.basename(fileName)
-      }
-    );
+  private async insertPendingImport(
+    ownerId: string,
+    importId: string,
+    fileName: string,
+    fileSha256: string,
+    sourceBlob: BlobPointer,
+    sourceSize: number,
+    options: CreateImportOptions
+  ): Promise<ImportRow> {
     const sourceChatTitle = deriveChatTitle(fileName) || "Untitled chat";
     const row = await fetchOne<ImportRow>(
       this.options.db,
@@ -1650,28 +1696,47 @@ export class ArchiveServices {
       VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *`,
       [
-        id,
+        importId,
         ownerId,
         fileName,
         fileSha256,
         sourceBlob.blobKey,
         sourceBlob.storageDriver,
         sourceBlob.metadata,
-        content.byteLength,
+        sourceSize,
         sourceChatTitle,
         normalizeKey(sourceChatTitle),
         JSON.stringify({
           selfDisplayName: options.selfDisplayName?.trim() || ""
         }),
-        JSON.stringify({
-          task: "Queued",
-          percent: 0
-        } satisfies ImportProgress)
+        JSON.stringify(createImportProgress("Queued", 0))
       ]
     );
     if (!row) {
       throw new Error("Failed to create import");
     }
+    return row;
+  }
+
+  async createImport(
+    ownerId: string,
+    fileName: string,
+    content: Buffer,
+    options: CreateImportOptions = {}
+  ) {
+    const fileSha256 = sha256Hex(content);
+    await this.assertImportDoesNotExist(ownerId, fileSha256);
+
+    const id = randomUUID();
+    const sourceBlob = await this.options.storage.put(
+      `imports/${ownerId}/${id}.bin`,
+      encryptBytes(content, this.options.config.encryptionKey),
+      {
+        kind: "source",
+        fileName: path.basename(fileName)
+      }
+    );
+    const row = await this.insertPendingImport(ownerId, id, fileName, fileSha256, sourceBlob, content.byteLength, options);
     this.kickWorker();
     return this.serializeImport(row);
   }
@@ -1683,20 +1748,11 @@ export class ArchiveServices {
     options: CreateImportOptions = {}
   ) {
     const { sha256: fileSha256, size } = await hashFileSha256(filePath);
-    const existing = await fetchOne<ImportRow>(
-      this.options.db,
-      "SELECT * FROM imports WHERE owner_id = $1 AND file_sha256 = $2",
-      [ownerId, fileSha256]
-    );
-    if (existing) {
-      const error = new Error("This export has already been imported");
-      (error as Error & { existingImportId?: string }).existingImportId = existing.id;
-      throw error;
-    }
+    await this.assertImportDoesNotExist(ownerId, fileSha256);
 
     const id = randomUUID();
     let sourceBlob: BlobPointer;
-    if (size > 2 * 1024 ** 3) {
+    if (size > this.options.config.largeImportThresholdBytes) {
       const tempDir = await mkdtemp(path.join(this.options.config.uploadTmpDir, "import-source-"));
       try {
         const encryptedImportPath = path.join(tempDir, `${id}.bin`);
@@ -1719,38 +1775,7 @@ export class ArchiveServices {
         }
       );
     }
-    const sourceChatTitle = deriveChatTitle(fileName) || "Untitled chat";
-    const row = await fetchOne<ImportRow>(
-      this.options.db,
-      `INSERT INTO imports (
-        id, owner_id, status, file_name, file_sha256, source_blob_key, source_blob_storage,
-        source_blob_metadata, source_size, source_chat_title, normalized_chat_title, import_options, progress_state
-      )
-      VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      RETURNING *`,
-      [
-        id,
-        ownerId,
-        fileName,
-        fileSha256,
-        sourceBlob.blobKey,
-        sourceBlob.storageDriver,
-        sourceBlob.metadata,
-        size,
-        sourceChatTitle,
-        normalizeKey(sourceChatTitle),
-        JSON.stringify({
-          selfDisplayName: options.selfDisplayName?.trim() || ""
-        }),
-        JSON.stringify({
-          task: "Queued",
-          percent: 0
-        } satisfies ImportProgress)
-      ]
-    );
-    if (!row) {
-      throw new Error("Failed to create import");
-    }
+    const row = await this.insertPendingImport(ownerId, id, fileName, fileSha256, sourceBlob, size, options);
     this.kickWorker();
     return this.serializeImport(row);
   }
@@ -1805,10 +1830,7 @@ export class ArchiveServices {
         JSON.stringify({
           selfDisplayName: nextSelfDisplayName
         }),
-        JSON.stringify({
-          task: "Queued",
-          percent: 0
-        })
+        JSON.stringify(createImportProgress("Queued", 0))
       ]
     );
     if (!updated) {
@@ -2083,13 +2105,14 @@ export class ArchiveServices {
     };
   }
 
-  startWorker(intervalMs = 2000): void {
+  startWorker(intervalMs = this.options.config.importWorkerIntervalMs): void {
     if (this.workerInterval) {
       return;
     }
+    const workerIntervalMs = clampPositiveInteger(intervalMs, this.options.config.importWorkerIntervalMs);
     this.workerInterval = setInterval(() => {
       void this.processPendingImports();
-    }, intervalMs);
+    }, workerIntervalMs);
     this.kickWorker();
   }
 
@@ -2100,13 +2123,14 @@ export class ArchiveServices {
     }
   }
 
-  async processPendingImports(limit = 10): Promise<void> {
+  async processPendingImports(limit = this.options.config.importWorkerBatchSize): Promise<void> {
     if (this.workerBusy) {
       return;
     }
+    const batchSize = clampPositiveInteger(limit, this.options.config.importWorkerBatchSize);
     this.workerBusy = true;
     try {
-      for (let index = 0; index < limit; index += 1) {
+      for (let index = 0; index < batchSize; index += 1) {
         const nextImport = await fetchOne<ImportRow>(
           this.options.db,
           `UPDATE imports
@@ -2119,16 +2143,12 @@ export class ArchiveServices {
              LIMIT 1
            )
            RETURNING *`,
-          [
-            JSON.stringify({
-              task: "Preparing import",
-              percent: 2
-            } satisfies ImportProgress)
-          ]
+          [JSON.stringify(createImportProgress("Preparing import", 2))]
         );
         if (!nextImport) {
           break;
         }
+        this.options.logger.info({ importId: nextImport.id, fileName: nextImport.file_name }, "Claimed import for processing");
         try {
           await this.processImport(nextImport);
         } catch (error) {
@@ -2144,10 +2164,7 @@ export class ArchiveServices {
             [
               nextImport.id,
               message,
-              JSON.stringify({
-                task: "Import failed",
-                percent: 0
-              } satisfies ImportProgress)
+              JSON.stringify(createImportProgress("Import failed", 0))
             ]
           );
           this.options.logger.error({ err: error, importId: nextImport.id }, "Failed to process import");
@@ -2177,30 +2194,40 @@ export class ArchiveServices {
   }
 
   private async processImport(importRow: ImportRow): Promise<void> {
+    const startedAt = Date.now();
     const importOptions = parseJson<{ selfDisplayName?: string }>(importRow.import_options, {});
     const sourceSize = Number(importRow.source_size);
-    let lastReportedProgress = "";
+    let lastReportedTask = "";
+    let lastReportedPercent = -1;
+    const minProgressStep = clampPositiveInteger(
+      this.options.config.importProgressStepPercent,
+      DEFAULT_IMPORT_PROGRESS_STEP_PERCENT
+    );
     const reportProgress = async (task: string, percent: number) => {
-      const next = JSON.stringify({
-        task,
-        percent: Math.max(0, Math.min(100, Math.round(percent)))
-      } satisfies ImportProgress);
-      if (next === lastReportedProgress) {
+      const progress = createImportProgress(task, percent);
+      const shouldPersist =
+        task !== lastReportedTask ||
+        lastReportedPercent < 0 ||
+        Math.abs(progress.percent - lastReportedPercent) >= minProgressStep ||
+        progress.percent === 0 ||
+        progress.percent === 100;
+      if (!shouldPersist) {
         return;
       }
-      lastReportedProgress = next;
+      lastReportedTask = task;
+      lastReportedPercent = progress.percent;
       await this.options.db.query(
         `UPDATE imports
          SET progress_state = $2, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1`,
-        [importRow.id, next]
+        [importRow.id, JSON.stringify(progress)]
       );
     };
 
     await reportProgress("Loading source", 8);
     let tempDir: string | null = null;
     let parsedArchive: ParsedArchive;
-    if (Number.isFinite(sourceSize) && sourceSize > 2 * 1024 ** 3) {
+    if (Number.isFinite(sourceSize) && sourceSize > this.options.config.largeImportThresholdBytes) {
       await reportProgress("Downloading source", 12);
       tempDir = await mkdtemp(path.join(this.options.config.uploadTmpDir, "import-process-"));
       const encryptedSourcePath = path.join(tempDir, `${importRow.id}.enc`);
@@ -2371,13 +2398,22 @@ export class ArchiveServices {
             participants: participantCache.size,
             withMedia: parsedArchive.withMedia
           } satisfies ImportSummary),
-          JSON.stringify({
-            task: "Completed",
-            percent: 100
-          } satisfies ImportProgress)
+          JSON.stringify(createImportProgress("Completed", 100))
         ]
       );
       await client.query("COMMIT");
+      this.options.logger.info(
+        {
+          importId: importRow.id,
+          ownerId: importRow.owner_id,
+          durationMs: Date.now() - startedAt,
+          messagesParsed: parsedArchive.messages.length,
+          messagesInserted,
+          attachmentsLinked,
+          attachmentsStored
+        },
+        "Completed import processing"
+      );
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

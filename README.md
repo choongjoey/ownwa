@@ -239,6 +239,10 @@ Important configuration values:
 - `ARCHIVE_ENCRYPTION_KEY`: 32-byte key for message and blob encryption.
 - `MAX_IMPORT_BYTES`: max accepted upload size, default 10 GB.
 - `UPLOAD_TMP_DIR`: temporary upload and large-import working directory.
+- `IMPORT_WORKER_INTERVAL_MS`: polling interval for the background import worker.
+- `IMPORT_WORKER_BATCH_SIZE`: maximum pending imports to claim in one worker pass.
+- `LARGE_IMPORT_THRESHOLD_BYTES`: size threshold that switches imports to the file-based large-archive path.
+- `IMPORT_PROGRESS_STEP_PERCENT`: minimum percent delta before persisting another in-flight progress update.
 - `BLOB_DRIVER`: `local` or `s3`.
 - `BLOB_ROOT`: local root for encrypted blob storage when using `local`.
 - `S3_REGION`, `S3_BUCKET`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE`: S3-compatible storage configuration.

@@ -92,6 +92,10 @@ describe("ArchiveServices oversized import worker", () => {
       encryptionKey: Buffer.from("development-encryption-key-12345"),
       maxImportBytes: 10737418240,
       uploadTmpDir,
+      importWorkerIntervalMs: 2000,
+      importWorkerBatchSize: 10,
+      largeImportThresholdBytes: 2 * 1024 ** 3,
+      importProgressStepPercent: 5,
       blobDriver: "local",
       blobRoot,
       s3ForcePathStyle: false

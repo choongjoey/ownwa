@@ -336,6 +336,14 @@ Typical stages include:
 - `Finalizing import`
 - `Completed`
 
+Progress writes are intentionally throttled:
+
+- task changes are always persisted
+- percentage-only changes are persisted only when they move by a configurable minimum step
+- the minimum step is controlled by `IMPORT_PROGRESS_STEP_PERCENT`
+
+This reduces unnecessary database churn on large imports while keeping the UI responsive.
+
 The client already polls import endpoints, so progress reporting is implemented without websockets:
 
 - the import modal shows recent import progress
@@ -410,6 +418,7 @@ Strengths:
 - reliable overlap deduplication
 - no external queue dependency
 - retryable failure model
+- configurable worker interval, batch size, large-file threshold, and progress persistence granularity
 
 Tradeoffs:
 

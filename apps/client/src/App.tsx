@@ -23,112 +23,50 @@ import {
   useParams,
   useSearchParams
 } from "react-router-dom";
-
-type User = {
-  id: string;
-  username: string;
-  createdAt: string;
-};
-
-type Settings = {
-  selfDisplayName: string;
-};
-
-type ImportProgress = {
-  task: string;
-  percent: number;
-};
-
-type ImportItem = {
-  id: string;
-  fileName: string;
-  chatTitle: string;
-  normalizedChatTitle: string;
-  status: "pending" | "processing" | "completed" | "failed";
-  sourceSize: number;
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-  progress: Partial<ImportProgress> | Record<string, unknown>;
-  parseSummary: Record<string, unknown>;
-  errorMessage: string | null;
-};
-
-type ChatItem = {
-  id: string;
-  title: string;
-  displayTitle: string;
-  sourceTitle: string;
-  titleOverridden: boolean;
-  normalizedTitle: string;
-  messageCount: number;
-  attachmentCount: number;
-  lastMessageAt: string | null;
-  updatedAt: string;
-};
-
-type SenderStat = {
-  sender: string;
-  total: number;
-};
-
-type ChatDetail = {
-  id: string;
-  title: string;
-  displayTitle: string;
-  sourceTitle: string;
-  titleOverridden: boolean;
-  normalizedTitle: string;
-  createdAt: string;
-  updatedAt: string;
-  stats: {
-    messageCount: number;
-    attachmentMessageCount: number;
-    senders: SenderStat[];
-  };
-};
-
-type AttachmentSummary = {
-  id: string;
-  fileName: string;
-  mimeType: string | null;
-  byteSize: number;
-  hasBlob: boolean;
-  placeholderText: string | null;
-  mediaKind: "image" | "video" | "sticker" | "file";
-  isAnimated: boolean;
-  previewUrl: string | null;
-  contentUrl: string | null;
-};
-
-type MessageItem = {
-  id: string;
-  chatId: string;
-  sender: string;
-  normalizedSender: string;
-  timestamp: string | null;
-  rawTimestampLabel: string;
-  body: string;
-  isMe: boolean;
-  messageKind: "message" | "event";
-  eventType: "system" | "call" | null;
-  hasAttachments: boolean;
-  attachments: AttachmentSummary[];
-};
-
-type MessagePage = {
-  total: number;
-  limit: number;
-  startOffset: number;
-  hasOlder: boolean;
-  hasNewer: boolean;
-  nextOlderOffset: number | null;
-};
-
-type SearchResult = MessageItem & {
-  chatTitle: string;
-  sourceTitle: string;
-};
+import {
+  EmptyState,
+  FeatureCard,
+  Field,
+  Icon,
+  ImportProgressPanel,
+  InfoTile,
+  InlineAlert,
+  LoadingScreen,
+  StatCard,
+  StatusPill
+} from "./components/ui";
+import { ImportModal } from "./features/imports/ImportModal";
+import {
+  clearImportRequest,
+  createImportRequest,
+  fetchImportRequest,
+  retryImportRequest
+} from "./features/imports/api";
+import { getImportProgress } from "./features/imports/progress";
+import { SettingsModal } from "./features/settings/SettingsModal";
+import { api, logoutUser } from "./lib/api";
+import {
+  formatBytes,
+  formatConversationCount,
+  formatDateTime,
+  formatRelativeChatTime,
+  formatTime,
+  getDateLabel,
+  getInitials,
+  humanizeKey
+} from "./lib/format";
+import type {
+  AttachmentSummary,
+  ChatDetail,
+  ChatItem,
+  ImportItem,
+  MediaViewerItem,
+  MessageItem,
+  MessagePage,
+  SearchResult,
+  Settings,
+  User
+} from "./lib/types";
 
 type AuthContextValue = {
   user: User | null;
@@ -137,48 +75,11 @@ type AuthContextValue = {
   setUser: (user: User | null) => void;
 };
 
-type MediaViewerItem = {
-  attachment: AttachmentSummary;
-  chatTitle: string;
-  sender: string;
-  timestamp: string | null;
-};
-
 const AuthContext = createContext<AuthContextValue | null>(null);
 const IMPORT_POLL_MS = 3000;
 const SEARCH_DEBOUNCE_MS = 180;
 const MESSAGE_FOCUS_DELAY_MS = 120;
 const CHAT_MESSAGES_PAGE_SIZE = 120;
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers || {});
-  if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  const response = await fetch(path, {
-    credentials: "include",
-    ...init,
-    headers
-  });
-
-  if (!response.ok) {
-    let message = "Request failed";
-    try {
-      const payload = (await response.json()) as { error?: string };
-      message = payload.error || message;
-    } catch {
-      message = response.statusText || message;
-    }
-    throw new Error(message);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return (await response.json()) as T;
-}
 
 function useAuth() {
   const context = useContext(AuthContext);
@@ -186,65 +87,6 @@ function useAuth() {
     throw new Error("useAuth must be used within AuthProvider");
   }
   return context;
-}
-
-async function logoutUser(navigate: ReturnType<typeof useNavigate>, setUser: (user: User | null) => void) {
-  await api("/api/auth/logout", {
-    method: "POST"
-  });
-  setUser(null);
-  navigate("/login");
-}
-
-async function retryImportRequest(importId: string): Promise<ImportItem> {
-  const payload = await api<{ import: ImportItem }>(`/api/imports/${importId}/retry`, {
-    method: "POST"
-  });
-  return payload.import;
-}
-
-async function clearImportRequest(importId: string): Promise<void> {
-  await api(`/api/imports/${importId}`, {
-    method: "DELETE"
-  });
-}
-
-function clampImportPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function getImportProgress(item: ImportItem): ImportProgress | null {
-  const rawProgress = item.progress;
-  const task = typeof rawProgress?.task === "string" ? rawProgress.task.trim() : "";
-  const percentValue =
-    typeof rawProgress?.percent === "number"
-      ? rawProgress.percent
-      : typeof rawProgress?.percent === "string"
-        ? Number(rawProgress.percent)
-        : Number.NaN;
-
-  if (task && Number.isFinite(percentValue)) {
-    return {
-      task,
-      percent: clampImportPercent(percentValue)
-    };
-  }
-
-  if (item.status === "pending") {
-    return {
-      task: "Queued",
-      percent: 0
-    };
-  }
-
-  if (item.status === "processing") {
-    return {
-      task: "Processing import",
-      percent: 0
-    };
-  }
-
-  return null;
 }
 
 function AuthProvider({ children }: { children: ReactNode }) {
@@ -666,12 +508,7 @@ function ArchiveWorkspace() {
     setError("");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      await api<{ import: ImportItem }>("/api/imports", {
-        method: "POST",
-        body: formData
-      });
+      await createImportRequest(file);
       resetImportSelection();
       setImportModalOpen(false);
       await loadSidebarData(true);
@@ -1400,8 +1237,8 @@ function ImportDetailPage() {
     }
 
     try {
-      const payload = await api<{ import: ImportItem }>(`/api/imports/${id}`);
-      setItem(payload.import);
+      const nextItem = await fetchImportRequest(id);
+      setItem(nextItem);
       setLoading(false);
       if (!keepError) {
         setError("");
@@ -1572,320 +1409,6 @@ function ImportDetailPage() {
   );
 }
 
-function ImportModal({
-  file,
-  imports,
-  summary,
-  uploading,
-  dragActive,
-  fileInputKey,
-  activeImportCount,
-  importActionId,
-  importActionKind,
-  onClose,
-  onFileChange,
-  onDrop,
-  onDragStateChange,
-  onRetryImport,
-  onClearImport,
-  onSubmit
-}: {
-  file: File | null;
-  imports: ImportItem[];
-  summary: {
-    chatCount: number;
-    importCount: number;
-    messageCount: number;
-    attachmentCount: number;
-  };
-  uploading: boolean;
-  dragActive: boolean;
-  fileInputKey: number;
-  activeImportCount: number;
-  importActionId: string | null;
-  importActionKind: "retry" | "clear" | null;
-  onClose: () => void;
-  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  onDrop: (event: DragEvent<HTMLLabelElement>) => void;
-  onDragStateChange: (value: boolean) => void;
-  onRetryImport: (importId: string) => void;
-  onClearImport: (importId: string) => void;
-  onSubmit: () => void;
-}) {
-  const fileId = `archive-file-input-${fileInputKey}`;
-  const recentImports = imports.slice(0, 4);
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#191d19]/28 px-4 py-6 backdrop-blur-[6px]">
-      <div className="archive-card relative flex max-h-[calc(100vh-3rem)] w-full max-w-4xl flex-col overflow-hidden rounded-[2.25rem] shadow-[0_40px_90px_rgba(18,22,18,0.26)]">
-        <button className="archive-icon-button absolute right-5 top-5 z-10" onClick={onClose}>
-          <Icon name="close" className="h-4 w-4" />
-        </button>
-
-        <div className="soft-scrollbar flex-1 overflow-y-auto px-6 pb-6 pt-7 sm:px-8 sm:pb-8">
-          <div className="max-w-2xl">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#61796a]">Import archive</div>
-            <h2 className="mt-3 text-4xl font-extrabold tracking-[-0.05em] text-[#17211b]">Import chat history</h2>
-            <p className="mt-4 text-base leading-8 text-[#5d6861]">
-              Bring a WhatsApp export into OwnWA and keep the archive calm, searchable, and readable.
-              Supports plain transcript files and zipped exports with media.
-            </p>
-          </div>
-
-          <div className="mt-7 grid gap-4 md:grid-cols-2">
-            <InstructionCard
-              step="1"
-              tone="green"
-              title="Export from WhatsApp"
-              body='Open the chat in WhatsApp, choose "Export Chat", and save the resulting .txt or .zip file.'
-            />
-            <InstructionCard
-              step="2"
-              tone="peach"
-              title="Upload it here"
-              body="Drag the export into the dropzone or browse for the file manually to begin processing."
-            />
-          </div>
-
-          <label
-            htmlFor={fileId}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              onDragStateChange(true);
-            }}
-            onDragLeave={(event) => {
-              event.preventDefault();
-              onDragStateChange(false);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              onDragStateChange(true);
-            }}
-            onDrop={onDrop}
-            className={`mt-7 flex cursor-pointer flex-col items-center rounded-[2rem] border-2 border-dashed px-6 py-12 text-center transition ${
-              dragActive
-                ? "border-[#26ab57] bg-[#eef8f0]"
-                : "border-[#d9ddd4] bg-[#fbfaf5] hover:border-[#93c3a0] hover:bg-[#f8faf7]"
-            }`}
-          >
-            <input key={fileId} id={fileId} type="file" accept=".txt,.zip" className="hidden" onChange={onFileChange} />
-            <div className="flex h-20 w-20 items-center justify-center rounded-full bg-[#eef1ea] text-[#267245]">
-              <Icon name="upload" className="h-10 w-10" />
-            </div>
-            <h3 className="mt-6 text-2xl font-extrabold tracking-[-0.04em] text-[#171f1a]">
-              {file ? file.name : "Drag and drop files"}
-            </h3>
-            <p className="mt-3 max-w-xl text-sm leading-7 text-[#69736d]">
-              Supports WhatsApp history `.txt` transcripts and compressed `.zip` archives with media.
-            </p>
-            <span className="archive-secondary-button mt-6">Browse files</span>
-            {file ? (
-              <div className="mt-6 rounded-[1.2rem] bg-white/90 px-4 py-3 text-sm text-[#445048] shadow-[0_10px_24px_rgba(64,56,41,0.07)]">
-                Ready to import {formatBytes(file.size)}
-              </div>
-            ) : null}
-          </label>
-
-          <div className="mt-7 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-            <div className="rounded-[1.5rem] border border-[#ece5da] bg-white/70 px-5 py-4">
-              <div className="flex items-start gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fff0e6] text-[#97532c]">
-                  <Icon name="lock" className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#9c5d36]">Privacy first</div>
-                  <p className="mt-2 text-sm leading-6 text-[#66726c]">
-                    Files are processed through your own OwnWA instance and stored as encrypted blobs.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-[1.5rem] border border-[#dde5dd] bg-[#f6f8f4] px-5 py-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Queue</div>
-                  <div className="mt-1 text-sm font-semibold text-[#1e2a22]">
-                    {activeImportCount > 0 ? `${activeImportCount} active imports` : "Queue is clear"}
-                  </div>
-                </div>
-                <StatusPill status={activeImportCount > 0 ? "processing" : "completed"} compact />
-              </div>
-              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                <SidebarMetric label="Chats" value={summary.chatCount.toLocaleString()} />
-                <SidebarMetric label="Imports" value={summary.importCount.toLocaleString()} />
-                <SidebarMetric label="Messages" value={summary.messageCount.toLocaleString()} />
-                <SidebarMetric label="Media" value={summary.attachmentCount.toLocaleString()} />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-[1.6rem] bg-[#f2f4ef] p-5">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Recent imports</div>
-                <div className="mt-1 text-sm font-semibold text-[#1e2a22]">Latest queue activity</div>
-              </div>
-              <span className="rounded-full bg-white/90 px-3 py-1 text-[11px] font-semibold text-[#496655]">
-                {imports.length} total
-              </span>
-            </div>
-
-            <div className="mt-4 space-y-2">
-              {recentImports.length === 0 ? (
-                <div className="rounded-[1.1rem] border border-dashed border-[#d9ddd4] bg-white/65 px-3 py-4 text-sm text-[#748078]">
-                  No imports yet. Start with a `.txt` transcript or `.zip` export above.
-                </div>
-              ) : (
-                recentImports.map((item) => {
-                  const actionActive = importActionId === item.id;
-                  const progress = getImportProgress(item);
-                  const isActive = item.status === "pending" || item.status === "processing";
-                  if (item.status !== "failed") {
-                    return (
-                      <Link
-                        key={item.id}
-                        to={`/imports/${item.id}`}
-                        className="flex items-start justify-between gap-3 rounded-[1rem] border border-white/65 bg-white/80 px-3 py-3 transition hover:-translate-y-0.5 hover:shadow-[0_14px_24px_rgba(60,54,36,0.08)]"
-                        onClick={onClose}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold text-[#202a22]">{item.chatTitle}</div>
-                          <div className="truncate text-xs text-[#7c847d]">{item.fileName}</div>
-                          {isActive && progress ? <ImportProgressPanel progress={progress} compact /> : null}
-                        </div>
-                        <StatusPill status={item.status} compact />
-                      </Link>
-                    );
-                  }
-
-                  return (
-                    <div
-                      key={item.id}
-                      className="rounded-[1rem] border border-[#f0ddd7] bg-white/88 px-3 py-3 shadow-[0_10px_20px_rgba(60,54,36,0.05)]"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <Link to={`/imports/${item.id}`} className="min-w-0 flex-1" onClick={onClose}>
-                          <div className="truncate text-sm font-semibold text-[#202a22]">{item.chatTitle}</div>
-                          <div className="truncate text-xs text-[#7c847d]">{item.fileName}</div>
-                        </Link>
-                        <StatusPill status={item.status} compact />
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="rounded-full bg-[#1f6f48] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-[#165839] disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={uploading || actionActive}
-                          onClick={() => onRetryImport(item.id)}
-                        >
-                          {actionActive && importActionKind === "retry" ? "Retrying..." : "Retry"}
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded-full border border-[#e6cfc7] bg-white px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#965843] transition hover:bg-[#fff5f1] disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={uploading || actionActive}
-                          onClick={() => onClearImport(item.id)}
-                        >
-                          {actionActive && importActionKind === "clear" ? "Clearing..." : "Clear"}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-col-reverse items-center justify-between gap-3 border-t border-white/55 bg-[#f7f5ef] px-6 py-4 sm:flex-row sm:px-8">
-          <button className="archive-secondary-button w-full justify-center sm:w-auto" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="archive-primary-button w-full justify-center sm:w-auto" disabled={uploading || !file} onClick={onSubmit}>
-            {uploading ? "Starting import..." : "Start import"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SettingsModal({
-  username,
-  value,
-  savedValue,
-  saving,
-  onChange,
-  onClose,
-  onSubmit
-}: {
-  username: string;
-  value: string;
-  savedValue: string;
-  saving: boolean;
-  onChange: (value: string) => void;
-  onClose: () => void;
-  onSubmit: (event: FormEvent) => void;
-}) {
-  const nameMissing = !savedValue;
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#191d19]/28 px-4 py-6 backdrop-blur-[6px]">
-      <div className="archive-card relative w-full max-w-xl rounded-[2.25rem] shadow-[0_40px_90px_rgba(18,22,18,0.26)]">
-        <button className="archive-icon-button absolute right-5 top-5 z-10" onClick={onClose} type="button">
-          <Icon name="close" className="h-4 w-4" />
-        </button>
-
-        <form className="px-6 pb-6 pt-7 sm:px-8 sm:pb-8" onSubmit={onSubmit}>
-          <div className="pr-14">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#61796a]">Your name</div>
-            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-[#17211b]">How OwnWA marks your messages</h2>
-            <p className="mt-4 text-sm leading-7 text-[#5d6861]">
-              Set the name WhatsApp uses for you so new imports can recognize outgoing messages correctly.
-            </p>
-          </div>
-
-          <div className="mt-6 rounded-[1.5rem] border border-[#dde5dd] bg-[#f6f8f4] px-5 py-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Account</div>
-                <div className="mt-1 text-sm font-semibold text-[#1e2a22]">{username}</div>
-              </div>
-              <span className="rounded-full bg-white/90 px-3 py-1 text-[11px] font-semibold text-[#496655]">
-                {nameMissing ? "Needed" : "Saved"}
-              </span>
-            </div>
-          </div>
-
-          <label className="mt-6 block space-y-2">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#68746c]">WhatsApp display name</span>
-            <input
-              value={value}
-              onChange={(event) => onChange(event.target.value)}
-              placeholder="Your WhatsApp display name"
-              className="archive-input w-full"
-              autoFocus
-            />
-          </label>
-
-          <p className="mt-3 text-xs leading-6 text-[#738078]">
-            Used to mark outgoing messages on new imports.
-          </p>
-
-          <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-            <button className="archive-secondary-button w-full justify-center sm:w-auto" onClick={onClose} type="button">
-              Cancel
-            </button>
-            <button type="submit" disabled={saving} className="archive-primary-button w-full justify-center sm:w-auto">
-              {saving ? "Saving..." : "Save name"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
 function MediaViewer({
   item,
   onClose
@@ -2039,347 +1562,6 @@ function AttachmentPreview({
   );
 }
 
-function FeatureCard({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="rounded-[1.45rem] border border-white/65 bg-white/72 p-4 shadow-[0_14px_30px_rgba(64,55,39,0.06)]">
-      <div className="text-sm font-semibold text-[#1f2923]">{title}</div>
-      <p className="mt-2 text-sm leading-6 text-[#647068]">{body}</p>
-    </div>
-  );
-}
-
-function SidebarMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-[1rem] border border-white/60 bg-white/72 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
-      <div className="text-[10px] uppercase tracking-[0.22em] text-[#7a847c]">{label}</div>
-      <div className="mt-1.5 text-sm font-semibold text-[#1f2923]">{value}</div>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  type = "text",
-  autoComplete
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-  type?: string;
-  autoComplete?: string;
-}) {
-  return (
-    <label className="block space-y-2">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#68746c]">{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        autoComplete={autoComplete}
-        placeholder={placeholder}
-        className="archive-input w-full"
-      />
-    </label>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-[1.4rem] border border-white/62 bg-white/78 px-4 py-4 shadow-[0_14px_28px_rgba(64,55,39,0.06)]">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#6f7a72]">{label}</div>
-      <div className="mt-2 text-[1.55rem] font-extrabold tracking-[-0.04em] text-[#18211c]">{value}</div>
-    </div>
-  );
-}
-
-function InfoTile({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="rounded-[1.3rem] border border-white/62 bg-white/72 p-4 shadow-[0_14px_28px_rgba(64,55,39,0.06)]">
-      <div className="text-sm font-semibold text-[#1e2822]">{title}</div>
-      <p className="mt-2 text-sm leading-6 text-[#66726c]">{body}</p>
-    </div>
-  );
-}
-
-function InstructionCard({
-  step,
-  tone,
-  title,
-  body
-}: {
-  step: string;
-  tone: "green" | "peach";
-  title: string;
-  body: string;
-}) {
-  const circleClasses =
-    tone === "green"
-      ? "bg-[#d1efe1] text-[#236545]"
-      : "bg-[#ffd9cb] text-[#834322]";
-
-  return (
-    <div className="rounded-[1.7rem] bg-[#f2f4ef] p-5">
-      <div className="flex items-center gap-3">
-        <div className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-bold ${circleClasses}`}>
-          {step}
-        </div>
-        <div className="text-lg font-bold tracking-[-0.03em] text-[#1e2722]">{title}</div>
-      </div>
-      <p className="mt-4 text-sm leading-7 text-[#66736c]">{body}</p>
-    </div>
-  );
-}
-
-function ImportProgressPanel({
-  progress,
-  compact = false
-}: {
-  progress: ImportProgress;
-  compact?: boolean;
-}) {
-  return (
-    <div className={compact ? "mt-3" : "mt-5 rounded-[1.3rem] border border-[#dde6d9] bg-[#f7faf5] p-4"}>
-      <div className="flex items-center justify-between gap-3">
-        <div className={`font-semibold text-[#214132] ${compact ? "text-xs" : "text-sm"}`}>{progress.task}</div>
-        <div className={`font-semibold text-[#2c6a47] ${compact ? "text-[11px]" : "text-sm"}`}>{progress.percent}%</div>
-      </div>
-      <div className={`overflow-hidden rounded-full bg-[#dfe8dd] ${compact ? "mt-2 h-1.5" : "mt-3 h-2.5"}`}>
-        <div
-          className="h-full rounded-full bg-[#2b8a57] transition-[width] duration-300 ease-out"
-          style={{ width: `${progress.percent}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function StatusPill({
-  status,
-  compact = false
-}: {
-  status: ImportItem["status"];
-  compact?: boolean;
-}) {
-  const classes =
-    status === "completed"
-      ? "bg-[#e2f4e7] text-[#207043]"
-      : status === "failed"
-        ? "bg-[#ffe8e4] text-[#a74e39]"
-        : status === "processing"
-          ? "bg-[#fff1de] text-[#9b6221]"
-          : "bg-[#e5eef8] text-[#396598]";
-
-  return (
-    <span
-      className={`rounded-full px-3 py-1 font-semibold uppercase tracking-[0.18em] ${compact ? "text-[10px]" : "text-xs"} ${classes}`}
-    >
-      {status}
-    </span>
-  );
-}
-
-function InlineAlert({ children, tone }: { children: ReactNode; tone: "error" | "info" }) {
-  return (
-    <div
-      className={`rounded-[1.2rem] border px-4 py-3 text-sm ${
-        tone === "error"
-          ? "border-[#f0cbc5] bg-[#fff2ef] text-[#9a4d3e]"
-          : "border-[#cfe3ef] bg-[#eff8fc] text-[#3f6d82]"
-      }`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function EmptyState({
-  title,
-  body,
-  compact = false
-}: {
-  title: string;
-  body: string;
-  compact?: boolean;
-}) {
-  return (
-    <div
-      className={`rounded-[1.35rem] border border-dashed border-[#d8ddd4] bg-white/62 text-sm text-[#65726a] ${
-        compact ? "p-4" : "p-5"
-      }`}
-    >
-      <div className="font-semibold text-[#1f2a23]">{title}</div>
-      <p className="mt-2 leading-6">{body}</p>
-    </div>
-  );
-}
-
-function LoadingScreen({
-  label,
-  fullScreen = false
-}: {
-  label: string;
-  fullScreen?: boolean;
-}) {
-  return (
-    <div
-      className={`archive-card archive-card-strong flex items-center justify-center p-8 ${
-        fullScreen ? "min-h-[calc(100vh-2rem)]" : "m-4 min-h-[28rem]"
-      }`}
-    >
-      <div className="space-y-4 text-center">
-        <div className="mx-auto h-14 w-14 animate-spin rounded-full border-4 border-[#c8d8cb] border-t-[#2c6c52]" />
-        <div className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#557464]">{label}</div>
-      </div>
-    </div>
-  );
-}
-
-function Icon({
-  name,
-  className
-}: {
-  name:
-    | "archive"
-    | "arrow-left"
-    | "check"
-    | "close"
-    | "edit"
-    | "file"
-    | "image"
-    | "lock"
-    | "logout"
-    | "play"
-    | "search"
-    | "spark"
-    | "upload"
-    | "video";
-  className?: string;
-}) {
-  const commonProps = {
-    className,
-    fill: "none",
-    stroke: "currentColor",
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    strokeWidth: 1.8,
-    viewBox: "0 0 24 24"
-  };
-
-  switch (name) {
-    case "archive":
-      return (
-        <svg {...commonProps}>
-          <rect x="3" y="5" width="18" height="4" rx="1" />
-          <path d="M5 9h14v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9Z" />
-          <path d="M10 13h4" />
-        </svg>
-      );
-    case "arrow-left":
-      return (
-        <svg {...commonProps}>
-          <path d="M19 12H5" />
-          <path d="m12 19-7-7 7-7" />
-        </svg>
-      );
-    case "check":
-      return (
-        <svg {...commonProps}>
-          <path d="m4 12 4 4 5-5" />
-          <path d="m13 11 4 4 3-3" />
-        </svg>
-      );
-    case "close":
-      return (
-        <svg {...commonProps}>
-          <path d="M6 6l12 12" />
-          <path d="M18 6 6 18" />
-        </svg>
-      );
-    case "edit":
-      return (
-        <svg {...commonProps}>
-          <path d="M12 20h9" />
-          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-        </svg>
-      );
-    case "file":
-      return (
-        <svg {...commonProps}>
-          <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7Z" />
-          <path d="M14 2v5h5" />
-        </svg>
-      );
-    case "image":
-      return (
-        <svg {...commonProps}>
-          <rect x="3" y="4" width="18" height="16" rx="2" />
-          <circle cx="9" cy="10" r="1.5" />
-          <path d="m21 16-5-5L5 20" />
-        </svg>
-      );
-    case "lock":
-      return (
-        <svg {...commonProps}>
-          <rect x="5" y="11" width="14" height="10" rx="2" />
-          <path d="M8 11V8a4 4 0 1 1 8 0v3" />
-        </svg>
-      );
-    case "logout":
-      return (
-        <svg {...commonProps}>
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-          <path d="M16 17l5-5-5-5" />
-          <path d="M21 12H9" />
-        </svg>
-      );
-    case "play":
-      return (
-        <svg {...commonProps}>
-          <path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="none" />
-        </svg>
-      );
-    case "search":
-      return (
-        <svg {...commonProps}>
-          <circle cx="11" cy="11" r="7" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
-      );
-    case "spark":
-      return (
-        <svg {...commonProps}>
-          <path d="M12 3v6" />
-          <path d="M12 15v6" />
-          <path d="m6 6 4 4" />
-          <path d="m14 14 4 4" />
-          <path d="M3 12h6" />
-          <path d="M15 12h6" />
-          <path d="m6 18 4-4" />
-          <path d="m14 10 4-4" />
-        </svg>
-      );
-    case "upload":
-      return (
-        <svg {...commonProps}>
-          <path d="M12 16V4" />
-          <path d="m7 9 5-5 5 5" />
-          <path d="M5 20h14" />
-        </svg>
-      );
-    case "video":
-      return (
-        <svg {...commonProps}>
-          <rect x="3" y="6" width="13" height="12" rx="2" />
-          <path d="m16 10 5-3v10l-5-3Z" />
-        </svg>
-      );
-  }
-}
-
 function shouldRenderMessageBody(message: MessageItem) {
   const trimmed = message.body.trim();
   if (!trimmed) {
@@ -2395,79 +1577,6 @@ function shouldRenderMessageBody(message: MessageItem) {
     return false;
   }
   return true;
-}
-
-function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** index;
-  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short"
-  }).format(new Date(value));
-}
-
-function formatTime(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(new Date(value));
-}
-
-function formatRelativeChatTime(value: string) {
-  const date = new Date(value);
-  const now = new Date();
-  const sameDay = now.toDateString() === date.toDateString();
-  if (sameDay) {
-    return formatTime(value);
-  }
-
-  const yesterday = new Date();
-  yesterday.setDate(now.getDate() - 1);
-  if (yesterday.toDateString() === date.toDateString()) {
-    return "Yesterday";
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric"
-  }).format(date);
-}
-
-function getDateLabel(message: MessageItem) {
-  if (message.timestamp) {
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium"
-    }).format(new Date(message.timestamp));
-  }
-  return message.rawTimestampLabel.split(",")[0] || "Unknown date";
-}
-
-function getInitials(value: string) {
-  const parts = value
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2);
-  if (parts.length === 0) {
-    return "OW";
-  }
-  return parts.map((part) => part[0]?.toUpperCase() || "").join("");
-}
-
-function humanizeKey(value: string) {
-  return value.replace(/([A-Z])/g, " $1").replace(/[_-]/g, " ").replace(/^./, (letter) => letter.toUpperCase());
-}
-
-function formatConversationCount(count: number) {
-  return `${count.toLocaleString()} conversation${count === 1 ? "" : "s"}`;
 }
 
 export default function App() {
