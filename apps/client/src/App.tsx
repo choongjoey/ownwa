@@ -4,7 +4,9 @@ import {
   useContext,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type DragEvent,
@@ -32,6 +34,11 @@ type Settings = {
   selfDisplayName: string;
 };
 
+type ImportProgress = {
+  task: string;
+  percent: number;
+};
+
 type ImportItem = {
   id: string;
   fileName: string;
@@ -42,6 +49,7 @@ type ImportItem = {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  progress: Partial<ImportProgress> | Record<string, unknown>;
   parseSummary: Record<string, unknown>;
   errorMessage: string | null;
 };
@@ -108,6 +116,15 @@ type MessageItem = {
   attachments: AttachmentSummary[];
 };
 
+type MessagePage = {
+  total: number;
+  limit: number;
+  startOffset: number;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  nextOlderOffset: number | null;
+};
+
 type SearchResult = MessageItem & {
   chatTitle: string;
   sourceTitle: string;
@@ -131,6 +148,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const IMPORT_POLL_MS = 3000;
 const SEARCH_DEBOUNCE_MS = 180;
 const MESSAGE_FOCUS_DELAY_MS = 120;
+const CHAT_MESSAGES_PAGE_SIZE = 120;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers || {});
@@ -176,6 +194,57 @@ async function logoutUser(navigate: ReturnType<typeof useNavigate>, setUser: (us
   });
   setUser(null);
   navigate("/login");
+}
+
+async function retryImportRequest(importId: string): Promise<ImportItem> {
+  const payload = await api<{ import: ImportItem }>(`/api/imports/${importId}/retry`, {
+    method: "POST"
+  });
+  return payload.import;
+}
+
+async function clearImportRequest(importId: string): Promise<void> {
+  await api(`/api/imports/${importId}`, {
+    method: "DELETE"
+  });
+}
+
+function clampImportPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function getImportProgress(item: ImportItem): ImportProgress | null {
+  const rawProgress = item.progress;
+  const task = typeof rawProgress?.task === "string" ? rawProgress.task.trim() : "";
+  const percentValue =
+    typeof rawProgress?.percent === "number"
+      ? rawProgress.percent
+      : typeof rawProgress?.percent === "string"
+        ? Number(rawProgress.percent)
+        : Number.NaN;
+
+  if (task && Number.isFinite(percentValue)) {
+    return {
+      task,
+      percent: clampImportPercent(percentValue)
+    };
+  }
+
+  if (item.status === "pending") {
+    return {
+      task: "Queued",
+      percent: 0
+    };
+  }
+
+  if (item.status === "processing") {
+    return {
+      task: "Processing import",
+      percent: 0
+    };
+  }
+
+  return null;
 }
 
 function AuthProvider({ children }: { children: ReactNode }) {
@@ -380,6 +449,8 @@ function ArchiveWorkspace() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [activeChat, setActiveChat] = useState<ChatDetail | null>(null);
   const [messages, setMessages] = useState<MessageItem[]>([]);
+  const [messagePage, setMessagePage] = useState<MessagePage | null>(null);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [sidebarLoading, setSidebarLoading] = useState(true);
@@ -389,7 +460,10 @@ function ArchiveWorkspace() {
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [importModalOpen, setImportModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [importActionId, setImportActionId] = useState<string | null>(null);
+  const [importActionKind, setImportActionKind] = useState<"retry" | "clear" | null>(null);
   const [mediaViewerItem, setMediaViewerItem] = useState<MediaViewerItem | null>(null);
   const [renamingChat, setRenamingChat] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -441,6 +515,8 @@ function ArchiveWorkspace() {
     if (!chatId) {
       setActiveChat(null);
       setMessages([]);
+      setMessagePage(null);
+      setLoadingOlderMessages(false);
       setRenamingChat(false);
       setTitleDraft("");
       return;
@@ -448,24 +524,33 @@ function ArchiveWorkspace() {
 
     setChatLoading(true);
 
+    const messageParams = new URLSearchParams({
+      limit: String(CHAT_MESSAGES_PAGE_SIZE)
+    });
+    if (focusedMessageId) {
+      messageParams.set("aroundMessageId", focusedMessageId);
+    }
+
     void Promise.all([
       api<{ chat: ChatDetail }>(`/api/chats/${chatId}`),
-      api<{ messages: MessageItem[] }>(`/api/chats/${chatId}/messages`)
+      api<{ messages: MessageItem[]; page: MessagePage }>(`/api/chats/${chatId}/messages?${messageParams.toString()}`)
     ])
-      .then(([chatPayload, messagesPayload]) => {
+      .then(([chatPayload, messagePayload]) => {
         setActiveChat(chatPayload.chat);
-        setMessages(messagesPayload.messages);
+        setMessages(messagePayload.messages);
+        setMessagePage(messagePayload.page);
         setTitleDraft(chatPayload.chat.displayTitle);
       })
       .catch((loadError) => {
         setError(loadError instanceof Error ? loadError.message : "Unable to load chat");
         setActiveChat(null);
         setMessages([]);
+        setMessagePage(null);
       })
       .finally(() => {
         setChatLoading(false);
       });
-  }, [chatId]);
+  }, [chatId, focusedMessageId]);
 
   useEffect(() => {
     const trimmedDeferredQuery = deferredQuery.trim();
@@ -482,19 +567,6 @@ function ArchiveWorkspace() {
 
     return () => window.clearTimeout(timeout);
   }, [deferredQuery]);
-
-  useEffect(() => {
-    if (!focusedMessageId || trimmedSearchQuery) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      const node = document.getElementById(`message-${focusedMessageId}`);
-      node?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, MESSAGE_FOCUS_DELAY_MS);
-
-    return () => window.clearTimeout(timeout);
-  }, [focusedMessageId, messages, trimmedSearchQuery]);
 
   const matchedChatIds = useMemo(() => new Set(searchResults.map((result) => result.chatId)), [searchResults]);
   const filteredChats = useMemo(() => {
@@ -532,7 +604,6 @@ function ArchiveWorkspace() {
     [chats, imports]
   );
 
-  const recentImports = imports.slice(0, 4);
   const activeImports = imports.filter((item) => item.status === "pending" || item.status === "processing");
   const activeImportCount = activeImports.length;
 
@@ -567,6 +638,20 @@ function ArchiveWorkspace() {
     resetImportSelection();
   };
 
+  const openSettingsModal = () => {
+    setSettingsDraft(settings.selfDisplayName);
+    setError("");
+    setSettingsModalOpen(true);
+  };
+
+  const closeSettingsModal = () => {
+    if (settingsSaving) {
+      return;
+    }
+    setSettingsDraft(settings.selfDisplayName);
+    setSettingsModalOpen(false);
+  };
+
   const handleLogout = async () => {
     await logoutUser(navigate, setUser);
   };
@@ -597,6 +682,43 @@ function ArchiveWorkspace() {
     }
   };
 
+  const handleRetryImport = async (importId: string) => {
+    setImportActionId(importId);
+    setImportActionKind("retry");
+    setError("");
+
+    try {
+      await retryImportRequest(importId);
+      await loadSidebarData(true);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to retry import");
+    } finally {
+      setImportActionId(null);
+      setImportActionKind(null);
+    }
+  };
+
+  const handleClearImport = async (importId: string) => {
+    const confirmed = window.confirm("Clear this failed import and remove its saved source file?");
+    if (!confirmed) {
+      return;
+    }
+
+    setImportActionId(importId);
+    setImportActionKind("clear");
+    setError("");
+
+    try {
+      await clearImportRequest(importId);
+      await loadSidebarData(true);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to clear import");
+    } finally {
+      setImportActionId(null);
+      setImportActionKind(null);
+    }
+  };
+
   const handleSaveSettings = async (event: FormEvent) => {
     event.preventDefault();
     setSettingsSaving(true);
@@ -610,6 +732,8 @@ function ArchiveWorkspace() {
         })
       });
       setSettings(payload.settings);
+      setSettingsDraft(payload.settings.selfDisplayName);
+      setSettingsModalOpen(false);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save settings");
     } finally {
@@ -643,6 +767,25 @@ function ArchiveWorkspace() {
     clearSearch();
     setSearchParams(new URLSearchParams({ message: result.id }));
     navigate(`/chats/${result.chatId}?message=${result.id}`);
+  };
+
+  const loadOlderMessages = async () => {
+    if (!chatId || !messagePage?.hasOlder || messagePage.nextOlderOffset === null || loadingOlderMessages) {
+      return;
+    }
+
+    setLoadingOlderMessages(true);
+    try {
+      const payload = await api<{ messages: MessageItem[]; page: MessagePage }>(
+        `/api/chats/${chatId}/messages?limit=${CHAT_MESSAGES_PAGE_SIZE}&beforeOffset=${messagePage.nextOlderOffset}`
+      );
+      setMessages((current) => [...payload.messages, ...current]);
+      setMessagePage(payload.page);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load older messages");
+    } finally {
+      setLoadingOlderMessages(false);
+    }
   };
 
   const handleFileSelection = (event: ChangeEvent<HTMLInputElement>) => {
@@ -679,17 +822,28 @@ function ArchiveWorkspace() {
               </button>
             </div>
 
-            <div className="mt-5 flex items-center gap-3 rounded-[1.25rem] bg-white/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]">
+            <button
+              className="mt-5 flex w-full items-center gap-3 rounded-[1.25rem] bg-white/70 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] transition hover:-translate-y-0.5 hover:bg-white/84 hover:shadow-[0_16px_28px_rgba(60,54,36,0.08)]"
+              onClick={openSettingsModal}
+              type="button"
+            >
               <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[#dce9df] text-sm font-bold uppercase text-[#275843]">
                 {getInitials(user?.username || "U")}
               </div>
-              <div className="min-w-0">
-                <div className="truncate font-semibold text-[#223128]">{user?.username}</div>
-                <div className="text-xs text-[#728078]">
-                  {activeImportCount > 0 ? `${activeImportCount} imports processing` : "Archive ready"}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-[#223128]">{user?.username}</div>
+                    <div className="text-xs text-[#728078]">
+                      {settings.selfDisplayName ? `Your name: ${settings.selfDisplayName}` : "Add your WhatsApp display name"}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-[#eef2eb] px-2.5 py-1 text-[11px] font-semibold text-[#4f6959]">
+                    {settings.selfDisplayName ? "Saved" : "Needed"}
+                  </span>
                 </div>
               </div>
-            </div>
+            </button>
 
             <button className="archive-primary-button mt-5 w-full" onClick={() => setImportModalOpen(true)}>
               <Icon name="upload" className="h-4 w-4" />
@@ -708,76 +862,14 @@ function ArchiveWorkspace() {
           </div>
 
           <div className="soft-scrollbar min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4">
-            <form className="archive-panel space-y-3 p-4" onSubmit={(event) => void handleSaveSettings(event)}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#6c786e]">Your name</div>
-                  <div className="mt-1 text-xs leading-5 text-[#738078]">Used to mark outgoing messages on new imports.</div>
-                </div>
-                <span className="rounded-full bg-[#eef2eb] px-2.5 py-1 text-[11px] font-semibold text-[#4f6959]">
-                  {settings.selfDisplayName ? "Saved" : "Needed"}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  value={settingsDraft}
-                  onChange={(event) => setSettingsDraft(event.target.value)}
-                  placeholder="Your WhatsApp display name"
-                  className="archive-input min-w-0 flex-1"
-                />
-                <button type="submit" disabled={settingsSaving} className="archive-secondary-button shrink-0">
-                  {settingsSaving ? "Saving..." : "Save"}
-                </button>
-              </div>
-            </form>
-
-            <div className="archive-panel mt-4 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#6c786e]">Archive</div>
-                  <div className="mt-1 text-sm font-semibold text-[#1e2a22]">Queue and activity</div>
-                </div>
-                <span className="rounded-full bg-[#eff3ec] px-2.5 py-1 text-[11px] font-semibold text-[#496655]">
-                  {summary.chatCount} chats
-                </span>
-              </div>
-              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                <SidebarMetric label="Messages" value={summary.messageCount.toLocaleString()} />
-                <SidebarMetric label="Media" value={summary.attachmentCount.toLocaleString()} />
-                <SidebarMetric label="Imports" value={summary.importCount.toLocaleString()} />
-                <SidebarMetric label="Active" value={activeImportCount.toLocaleString()} />
-              </div>
-              <div className="mt-4 space-y-2">
-                {recentImports.length === 0 ? (
-                  <div className="rounded-[1.1rem] border border-dashed border-[#d9ddd4] bg-white/55 px-3 py-4 text-sm text-[#748078]">
-                    No imports yet. Use the import button above to add your first archive.
-                  </div>
-                ) : (
-                  recentImports.map((item) => (
-                    <Link
-                      key={item.id}
-                      to={`/imports/${item.id}`}
-                      className="flex items-center justify-between gap-3 rounded-[1rem] border border-white/65 bg-white/72 px-3 py-3 transition hover:-translate-y-0.5 hover:shadow-[0_14px_24px_rgba(60,54,36,0.08)]"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold text-[#202a22]">{item.chatTitle}</div>
-                        <div className="truncate text-xs text-[#7c847d]">{item.fileName}</div>
-                      </div>
-                      <StatusPill status={item.status} compact />
-                    </Link>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="mt-4">
+            <div>
               <div className="mb-3 flex items-center justify-between px-1">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#6c786e]">Chats</div>
                   <div className="mt-1 text-sm font-semibold text-[#1e2a22]">
-                  {trimmedSearchQuery ? `${filteredChats.length} matches` : `${filteredChats.length} conversations`}
+                    {trimmedSearchQuery ? `${filteredChats.length} matches` : formatConversationCount(filteredChats.length)}
+                  </div>
                 </div>
-              </div>
                 {trimmedSearchQuery ? (
                   <button
                     className="text-xs font-semibold text-[#426a54] underline-offset-4 hover:underline"
@@ -870,6 +962,8 @@ function ArchiveWorkspace() {
             <ChatPane
               chat={activeChat}
               messages={messages}
+              messagePage={messagePage}
+              loadingOlderMessages={loadingOlderMessages}
               focusedMessageId={focusedMessageId}
               renamingChat={renamingChat}
               titleDraft={titleDraft}
@@ -888,6 +982,7 @@ function ArchiveWorkspace() {
                   timestamp: message.timestamp
                 })
               }
+              onLoadOlderMessages={loadOlderMessages}
             />
           ) : (
             <EmptyTranscriptState imports={imports} chats={chats} />
@@ -898,6 +993,8 @@ function ArchiveWorkspace() {
       {importModalOpen ? (
         <ImportModal
           file={file}
+          imports={imports}
+          summary={summary}
           uploading={uploading}
           dragActive={dragActive}
           fileInputKey={fileInputKey}
@@ -906,7 +1003,23 @@ function ArchiveWorkspace() {
           onFileChange={handleFileSelection}
           onDrop={handleDrop}
           onDragStateChange={setDragActive}
+          importActionId={importActionId}
+          importActionKind={importActionKind}
+          onRetryImport={(importId) => void handleRetryImport(importId)}
+          onClearImport={(importId) => void handleClearImport(importId)}
           onSubmit={() => void submitImport()}
+        />
+      ) : null}
+
+      {settingsModalOpen ? (
+        <SettingsModal
+          username={user?.username || ""}
+          value={settingsDraft}
+          savedValue={settings.selfDisplayName}
+          saving={settingsSaving}
+          onChange={setSettingsDraft}
+          onClose={closeSettingsModal}
+          onSubmit={(event) => void handleSaveSettings(event)}
         />
       ) : null}
 
@@ -995,6 +1108,8 @@ function SearchResultsPane({
 function ChatPane({
   chat,
   messages,
+  messagePage,
+  loadingOlderMessages,
   focusedMessageId,
   renamingChat,
   titleDraft,
@@ -1002,10 +1117,13 @@ function ChatPane({
   onStartRenaming,
   onCancelRenaming,
   onSubmitRename,
-  onPreviewMedia
+  onPreviewMedia,
+  onLoadOlderMessages
 }: {
   chat: ChatDetail;
   messages: MessageItem[];
+  messagePage: MessagePage | null;
+  loadingOlderMessages: boolean;
   focusedMessageId: string | null;
   renamingChat: boolean;
   titleDraft: string;
@@ -1014,7 +1132,54 @@ function ChatPane({
   onCancelRenaming: () => void;
   onSubmitRename: (event: FormEvent) => void;
   onPreviewMedia: (attachment: AttachmentSummary, message: MessageItem) => void;
+  onLoadOlderMessages: () => Promise<void>;
 }) {
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const prependAnchorHeightRef = useRef<number | null>(null);
+  const initialScrollHandledRef = useRef(false);
+
+  useEffect(() => {
+    initialScrollHandledRef.current = false;
+    prependAnchorHeightRef.current = null;
+  }, [chat.id, focusedMessageId]);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || messages.length === 0) {
+      return;
+    }
+
+    if (prependAnchorHeightRef.current !== null) {
+      const previousHeight = prependAnchorHeightRef.current;
+      prependAnchorHeightRef.current = null;
+      container.scrollTop += container.scrollHeight - previousHeight;
+      return;
+    }
+
+    if (!initialScrollHandledRef.current) {
+      initialScrollHandledRef.current = true;
+      if (focusedMessageId) {
+        window.setTimeout(() => {
+          document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({
+            behavior: "smooth",
+            block: "center"
+          });
+        }, MESSAGE_FOCUS_DELAY_MS);
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+  }, [chat.id, focusedMessageId, messages]);
+
+  const handleScroll = () => {
+    const container = scrollContainerRef.current;
+    if (!container || loadingOlderMessages || !messagePage?.hasOlder || container.scrollTop > 220) {
+      return;
+    }
+    prependAnchorHeightRef.current = container.scrollHeight;
+    void onLoadOlderMessages();
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-white/60 bg-white/72 px-4 py-4 sm:px-6">
@@ -1067,8 +1232,24 @@ function ChatPane({
         )}
       </div>
 
-      <div className="archive-wallpaper soft-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-5">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="archive-wallpaper soft-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-5"
+      >
         <div className="mx-auto flex max-w-5xl flex-col gap-1">
+          {messagePage?.hasOlder ? (
+            <div className="mb-4 flex justify-center">
+              <button
+                className="rounded-full bg-[#f4f3ed] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#66746d] shadow-[0_10px_22px_rgba(93,84,66,0.07)]"
+                onClick={() => void onLoadOlderMessages()}
+                disabled={loadingOlderMessages}
+              >
+                {loadingOlderMessages ? "Loading older messages..." : "Load older messages"}
+              </button>
+            </div>
+          ) : null}
+
           {messages.map((message, index) => {
             const previous = messages[index - 1];
             const currentDateLabel = getDateLabel(message);
@@ -1141,6 +1322,14 @@ function ChatPane({
               </div>
             );
           })}
+
+          {messagePage?.hasNewer && focusedMessageId ? (
+            <div className="mt-5 flex justify-center">
+              <span className="rounded-full bg-[#f4f3ed] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#66746d] shadow-[0_10px_22px_rgba(93,84,66,0.07)]">
+                Opened around the selected result
+              </span>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1201,27 +1390,83 @@ function ImportDetailPage() {
   const [item, setItem] = useState<ImportItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [action, setAction] = useState<"retry" | "clear" | null>(null);
 
-  useEffect(() => {
+  const loadImport = async (keepError = false) => {
     if (!id) {
       setLoading(false);
       setError("Import not found");
       return;
     }
 
-    void api<{ import: ImportItem }>(`/api/imports/${id}`)
-      .then((payload) => {
-        setItem(payload.import);
-        setLoading(false);
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : "Unable to load import");
-        setLoading(false);
-      });
+    try {
+      const payload = await api<{ import: ImportItem }>(`/api/imports/${id}`);
+      setItem(payload.import);
+      setLoading(false);
+      if (!keepError) {
+        setError("");
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load import");
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadImport();
   }, [id]);
+
+  useEffect(() => {
+    if (!id || (item?.status !== "pending" && item?.status !== "processing")) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadImport(true);
+    }, IMPORT_POLL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [id, item?.status]);
 
   const handleLogout = async () => {
     await logoutUser(navigate, setUser);
+  };
+
+  const handleRetry = async () => {
+    if (!id) {
+      return;
+    }
+
+    setAction("retry");
+    setError("");
+    try {
+      const nextItem = await retryImportRequest(id);
+      setItem(nextItem);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to retry import");
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const handleClear = async () => {
+    if (!id) {
+      return;
+    }
+    const confirmed = window.confirm("Clear this failed import and remove its saved source file?");
+    if (!confirmed) {
+      return;
+    }
+
+    setAction("clear");
+    setError("");
+    try {
+      await clearImportRequest(id);
+      navigate("/archive");
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to clear import");
+      setAction(null);
+    }
   };
 
   if (loading) {
@@ -1235,6 +1480,9 @@ function ImportDetailPage() {
       </div>
     );
   }
+
+  const importProgress = getImportProgress(item);
+  const isImportActive = item.status === "pending" || item.status === "processing";
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
@@ -1277,6 +1525,26 @@ function ImportDetailPage() {
               <InlineAlert tone="error">{item.errorMessage}</InlineAlert>
             </div>
           ) : null}
+
+          {isImportActive && importProgress ? <ImportProgressPanel progress={importProgress} /> : null}
+
+          {item.status === "failed" ? (
+            <div className="mt-5 rounded-[1.4rem] border border-[#ecd8cf] bg-[#fff8f4] p-4">
+              <div className="text-sm font-semibold text-[#6e4636]">Keep the saved file and decide what to do next.</div>
+              <p className="mt-2 text-sm leading-6 text-[#816456]">
+                Retry uses the encrypted source already stored on the server, and clear removes the failed record plus
+                that saved source file.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button className="archive-primary-button" disabled={action !== null} onClick={() => void handleRetry()}>
+                  {action === "retry" ? "Retrying..." : "Retry import"}
+                </button>
+                <button className="archive-secondary-button" disabled={action !== null} onClick={() => void handleClear()}>
+                  {action === "clear" ? "Clearing..." : "Clear failed import"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="archive-card p-6 sm:p-7">
@@ -1306,28 +1574,46 @@ function ImportDetailPage() {
 
 function ImportModal({
   file,
+  imports,
+  summary,
   uploading,
   dragActive,
   fileInputKey,
   activeImportCount,
+  importActionId,
+  importActionKind,
   onClose,
   onFileChange,
   onDrop,
   onDragStateChange,
+  onRetryImport,
+  onClearImport,
   onSubmit
 }: {
   file: File | null;
+  imports: ImportItem[];
+  summary: {
+    chatCount: number;
+    importCount: number;
+    messageCount: number;
+    attachmentCount: number;
+  };
   uploading: boolean;
   dragActive: boolean;
   fileInputKey: number;
   activeImportCount: number;
+  importActionId: string | null;
+  importActionKind: "retry" | "clear" | null;
   onClose: () => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onDrop: (event: DragEvent<HTMLLabelElement>) => void;
   onDragStateChange: (value: boolean) => void;
+  onRetryImport: (importId: string) => void;
+  onClearImport: (importId: string) => void;
   onSubmit: () => void;
 }) {
   const fileId = `archive-file-input-${fileInputKey}`;
+  const recentImports = imports.slice(0, 4);
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#191d19]/28 px-4 py-6 backdrop-blur-[6px]">
@@ -1400,20 +1686,113 @@ function ImportModal({
             ) : null}
           </label>
 
-          <div className="mt-7 rounded-[1.5rem] border border-[#ece5da] bg-white/70 px-5 py-4">
-            <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fff0e6] text-[#97532c]">
-                <Icon name="lock" className="h-5 w-5" />
+          <div className="mt-7 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <div className="rounded-[1.5rem] border border-[#ece5da] bg-white/70 px-5 py-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fff0e6] text-[#97532c]">
+                  <Icon name="lock" className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#9c5d36]">Privacy first</div>
+                  <p className="mt-2 text-sm leading-6 text-[#66726c]">
+                    Files are processed through your own OwnWA instance and stored as encrypted blobs.
+                  </p>
+                </div>
               </div>
+            </div>
+
+            <div className="rounded-[1.5rem] border border-[#dde5dd] bg-[#f6f8f4] px-5 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Queue</div>
+                  <div className="mt-1 text-sm font-semibold text-[#1e2a22]">
+                    {activeImportCount > 0 ? `${activeImportCount} active imports` : "Queue is clear"}
+                  </div>
+                </div>
+                <StatusPill status={activeImportCount > 0 ? "processing" : "completed"} compact />
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
+                <SidebarMetric label="Chats" value={summary.chatCount.toLocaleString()} />
+                <SidebarMetric label="Imports" value={summary.importCount.toLocaleString()} />
+                <SidebarMetric label="Messages" value={summary.messageCount.toLocaleString()} />
+                <SidebarMetric label="Media" value={summary.attachmentCount.toLocaleString()} />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[1.6rem] bg-[#f2f4ef] p-5">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#9c5d36]">Privacy first</div>
-                <p className="mt-2 text-sm leading-6 text-[#66726c]">
-                  Files are processed through your own OwnWA instance and stored as encrypted blobs.{" "}
-                  {activeImportCount > 0
-                    ? `${activeImportCount} imports are already moving through the queue.`
-                    : "No other imports are currently processing."}
-                </p>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Recent imports</div>
+                <div className="mt-1 text-sm font-semibold text-[#1e2a22]">Latest queue activity</div>
               </div>
+              <span className="rounded-full bg-white/90 px-3 py-1 text-[11px] font-semibold text-[#496655]">
+                {imports.length} total
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {recentImports.length === 0 ? (
+                <div className="rounded-[1.1rem] border border-dashed border-[#d9ddd4] bg-white/65 px-3 py-4 text-sm text-[#748078]">
+                  No imports yet. Start with a `.txt` transcript or `.zip` export above.
+                </div>
+              ) : (
+                recentImports.map((item) => {
+                  const actionActive = importActionId === item.id;
+                  const progress = getImportProgress(item);
+                  const isActive = item.status === "pending" || item.status === "processing";
+                  if (item.status !== "failed") {
+                    return (
+                      <Link
+                        key={item.id}
+                        to={`/imports/${item.id}`}
+                        className="flex items-start justify-between gap-3 rounded-[1rem] border border-white/65 bg-white/80 px-3 py-3 transition hover:-translate-y-0.5 hover:shadow-[0_14px_24px_rgba(60,54,36,0.08)]"
+                        onClick={onClose}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-semibold text-[#202a22]">{item.chatTitle}</div>
+                          <div className="truncate text-xs text-[#7c847d]">{item.fileName}</div>
+                          {isActive && progress ? <ImportProgressPanel progress={progress} compact /> : null}
+                        </div>
+                        <StatusPill status={item.status} compact />
+                      </Link>
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="rounded-[1rem] border border-[#f0ddd7] bg-white/88 px-3 py-3 shadow-[0_10px_20px_rgba(60,54,36,0.05)]"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <Link to={`/imports/${item.id}`} className="min-w-0 flex-1" onClick={onClose}>
+                          <div className="truncate text-sm font-semibold text-[#202a22]">{item.chatTitle}</div>
+                          <div className="truncate text-xs text-[#7c847d]">{item.fileName}</div>
+                        </Link>
+                        <StatusPill status={item.status} compact />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-full bg-[#1f6f48] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-[#165839] disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={uploading || actionActive}
+                          onClick={() => onRetryImport(item.id)}
+                        >
+                          {actionActive && importActionKind === "retry" ? "Retrying..." : "Retry"}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-full border border-[#e6cfc7] bg-white px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#965843] transition hover:bg-[#fff5f1] disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={uploading || actionActive}
+                          onClick={() => onClearImport(item.id)}
+                        >
+                          {actionActive && importActionKind === "clear" ? "Clearing..." : "Clear"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -1426,6 +1805,82 @@ function ImportModal({
             {uploading ? "Starting import..." : "Start import"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({
+  username,
+  value,
+  savedValue,
+  saving,
+  onChange,
+  onClose,
+  onSubmit
+}: {
+  username: string;
+  value: string;
+  savedValue: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  const nameMissing = !savedValue;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#191d19]/28 px-4 py-6 backdrop-blur-[6px]">
+      <div className="archive-card relative w-full max-w-xl rounded-[2.25rem] shadow-[0_40px_90px_rgba(18,22,18,0.26)]">
+        <button className="archive-icon-button absolute right-5 top-5 z-10" onClick={onClose} type="button">
+          <Icon name="close" className="h-4 w-4" />
+        </button>
+
+        <form className="px-6 pb-6 pt-7 sm:px-8 sm:pb-8" onSubmit={onSubmit}>
+          <div className="pr-14">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#61796a]">Your name</div>
+            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-[#17211b]">How OwnWA marks your messages</h2>
+            <p className="mt-4 text-sm leading-7 text-[#5d6861]">
+              Set the name WhatsApp uses for you so new imports can recognize outgoing messages correctly.
+            </p>
+          </div>
+
+          <div className="mt-6 rounded-[1.5rem] border border-[#dde5dd] bg-[#f6f8f4] px-5 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[#61796a]">Account</div>
+                <div className="mt-1 text-sm font-semibold text-[#1e2a22]">{username}</div>
+              </div>
+              <span className="rounded-full bg-white/90 px-3 py-1 text-[11px] font-semibold text-[#496655]">
+                {nameMissing ? "Needed" : "Saved"}
+              </span>
+            </div>
+          </div>
+
+          <label className="mt-6 block space-y-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-[#68746c]">WhatsApp display name</span>
+            <input
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="Your WhatsApp display name"
+              className="archive-input w-full"
+              autoFocus
+            />
+          </label>
+
+          <p className="mt-3 text-xs leading-6 text-[#738078]">
+            Used to mark outgoing messages on new imports.
+          </p>
+
+          <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+            <button className="archive-secondary-button w-full justify-center sm:w-auto" onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button type="submit" disabled={saving} className="archive-primary-button w-full justify-center sm:w-auto">
+              {saving ? "Saving..." : "Save name"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -1675,6 +2130,29 @@ function InstructionCard({
         <div className="text-lg font-bold tracking-[-0.03em] text-[#1e2722]">{title}</div>
       </div>
       <p className="mt-4 text-sm leading-7 text-[#66736c]">{body}</p>
+    </div>
+  );
+}
+
+function ImportProgressPanel({
+  progress,
+  compact = false
+}: {
+  progress: ImportProgress;
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? "mt-3" : "mt-5 rounded-[1.3rem] border border-[#dde6d9] bg-[#f7faf5] p-4"}>
+      <div className="flex items-center justify-between gap-3">
+        <div className={`font-semibold text-[#214132] ${compact ? "text-xs" : "text-sm"}`}>{progress.task}</div>
+        <div className={`font-semibold text-[#2c6a47] ${compact ? "text-[11px]" : "text-sm"}`}>{progress.percent}%</div>
+      </div>
+      <div className={`overflow-hidden rounded-full bg-[#dfe8dd] ${compact ? "mt-2 h-1.5" : "mt-3 h-2.5"}`}>
+        <div
+          className="h-full rounded-full bg-[#2b8a57] transition-[width] duration-300 ease-out"
+          style={{ width: `${progress.percent}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -1986,6 +2464,10 @@ function getInitials(value: string) {
 
 function humanizeKey(value: string) {
   return value.replace(/([A-Z])/g, " $1").replace(/[_-]/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function formatConversationCount(count: number) {
+  return `${count.toLocaleString()} conversation${count === 1 ? "" : "s"}`;
 }
 
 export default function App() {

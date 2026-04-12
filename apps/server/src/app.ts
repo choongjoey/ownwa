@@ -10,6 +10,7 @@ import { Pool } from "pg";
 import { z } from "zod";
 import {
   ArchiveServices,
+  ImportActionError,
   createBlobStorage,
   createConfig,
   runMigrations,
@@ -288,6 +289,51 @@ export async function createApp(options: CreateAppOptions = {}) {
     })
   );
 
+  app.post(
+    "/api/imports/:id/retry",
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const settings = await services.getUserSettings(req.authUser!.id);
+      try {
+        const item = await services.retryImport(req.authUser!.id, String(req.params.id), {
+          selfDisplayName: settings.selfDisplayName
+        });
+        if (!item) {
+          res.status(404).json({ error: "Import not found" });
+          return;
+        }
+        res.json({ import: item });
+      } catch (error) {
+        if (error instanceof ImportActionError) {
+          res.status(error.statusCode).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+    })
+  );
+
+  app.delete(
+    "/api/imports/:id",
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      try {
+        const cleared = await services.clearImport(req.authUser!.id, String(req.params.id));
+        if (!cleared) {
+          res.status(404).json({ error: "Import not found" });
+          return;
+        }
+        res.status(204).end();
+      } catch (error) {
+        if (error instanceof ImportActionError) {
+          res.status(error.statusCode).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+    })
+  );
+
   app.get(
     "/api/chats",
     requireAuth,
@@ -327,7 +373,20 @@ export async function createApp(options: CreateAppOptions = {}) {
     "/api/chats/:id/messages",
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
-      res.json({ messages: await services.getChatMessages(req.authUser!.id, String(req.params.id)) });
+      const limit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
+      const beforeOffset =
+        typeof req.query.beforeOffset === "string" ? Number.parseInt(req.query.beforeOffset, 10) : undefined;
+      const aroundMessageId =
+        typeof req.query.aroundMessageId === "string" && req.query.aroundMessageId.trim()
+          ? req.query.aroundMessageId.trim()
+          : undefined;
+      res.json(
+        await services.getChatMessages(req.authUser!.id, String(req.params.id), {
+          limit,
+          beforeOffset,
+          aroundMessageId
+        })
+      );
     })
   );
 

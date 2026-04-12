@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import argon2 from "argon2";
 import JSZip from "jszip";
 import mime from "mime-types";
@@ -10,12 +10,15 @@ import {
   randomBytes,
   randomUUID
 } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { copyFile, mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createInterface } from "node:readline";
 import type { Logger } from "pino";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
+import yauzl, { type Entry as ZipEntry, type ZipFile } from "yauzl";
 
 export type BlobDriverKind = "local" | "s3";
 
@@ -41,6 +44,16 @@ export interface SafeUser {
   id: string;
   username: string;
   createdAt: string;
+}
+
+export class ImportActionError extends Error {
+  readonly statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.name = "ImportActionError";
+    this.statusCode = statusCode;
+  }
 }
 
 interface UserRow extends QueryResultRow {
@@ -71,6 +84,7 @@ interface ImportRow extends QueryResultRow {
   source_chat_title: string;
   normalized_chat_title: string;
   import_options: string;
+  progress_state: string;
   parse_summary: string;
   error_message: string | null;
   created_at: Date | string;
@@ -133,6 +147,7 @@ interface AttachmentRecord {
   fileName: string;
   normalizedName: string;
   archivePath?: string;
+  sourceArchiveFilePath?: string;
   buffer?: Buffer;
   contentSha256?: string;
   byteSize: number;
@@ -158,6 +173,37 @@ export interface ParsedArchive {
   transcriptName: string;
   withMedia: boolean;
   messages: ParsedMessage[];
+}
+
+interface GetChatMessagesOptions {
+  limit?: number;
+  beforeOffset?: number;
+  aroundMessageId?: string;
+}
+
+interface ChatMessagesPage {
+  messages: Array<{
+    id: string;
+    chatId: string;
+    sender: string;
+    normalizedSender: string;
+    timestamp: string | null;
+    rawTimestampLabel: string;
+    body: string;
+    isMe: boolean;
+    messageKind: "message" | "event";
+    eventType: "system" | "call" | null;
+    hasAttachments: boolean;
+    attachments: AttachmentRecordSummary[];
+  }>;
+  page: {
+    total: number;
+    limit: number;
+    startOffset: number;
+    hasOlder: boolean;
+    hasNewer: boolean;
+    nextOlderOffset: number | null;
+  };
 }
 
 interface ChatListRow extends QueryResultRow {
@@ -211,9 +257,32 @@ interface ImportSummary {
   withMedia: boolean;
 }
 
+interface ImportProgress {
+  task: string;
+  percent: number;
+}
+
 interface ParsedJsonObject {
   [key: string]: unknown;
 }
+
+interface AttachmentRecordSummary {
+  id: string;
+  fileName: string;
+  mimeType: string | null;
+  byteSize: number;
+  hasBlob: boolean;
+  placeholderText: string | null;
+  mediaKind: "image" | "video" | "sticker" | "file";
+  isAnimated: boolean;
+  previewUrl: string | null;
+  contentUrl: string | null;
+}
+
+const ENCRYPTED_BLOB_VERSION = 1;
+const ENCRYPTED_BLOB_IV_LENGTH = 12;
+const ENCRYPTED_BLOB_TAG_LENGTH = 16;
+const ENCRYPTED_BLOB_HEADER_LENGTH = 1 + ENCRYPTED_BLOB_IV_LENGTH;
 
 type Queryable = Pool | PoolClient;
 
@@ -248,6 +317,7 @@ CREATE TABLE IF NOT EXISTS imports (
   source_chat_title TEXT NOT NULL,
   normalized_chat_title TEXT NOT NULL,
   import_options TEXT NOT NULL DEFAULT '{}',
+  progress_state TEXT NOT NULL DEFAULT '{}',
   parse_summary TEXT NOT NULL DEFAULT '{}',
   error_message TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -397,6 +467,7 @@ export async function runMigrations(db: Queryable): Promise<void> {
   await db.query(schemaSql);
   await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS self_display_name TEXT");
   await db.query("ALTER TABLE imports ALTER COLUMN source_size TYPE BIGINT");
+  await db.query("ALTER TABLE imports ADD COLUMN IF NOT EXISTS progress_state TEXT NOT NULL DEFAULT '{}'");
   await db.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS display_title TEXT");
   await db.query(
     "ALTER TABLE chats ADD COLUMN IF NOT EXISTS title_overridden BOOLEAN NOT NULL DEFAULT FALSE"
@@ -463,11 +534,66 @@ function stripExtension(fileName: string): string {
 
 function deriveChatTitle(fileName: string): string {
   const clean = stripExtension(path.basename(fileName));
-  return clean
+  const derived = clean
     .replace(/^WhatsApp Chat with /i, "")
     .replace(/^WhatsApp Chat\s*-\s*/i, "")
     .replace(/^Chat with /i, "")
     .trim();
+  return isGenericChatTitle(derived) ? "" : derived;
+}
+
+function isGenericChatTitle(value: string): boolean {
+  const normalized = normalizeKey(value.replace(/[_-]+/g, " "));
+  if (!normalized) {
+    return true;
+  }
+  if (["chat", "whatsapp chat", "conversation", "conversations", "untitled chat", "messages"].includes(normalized)) {
+    return true;
+  }
+  return /^(?:chat|conversation|messages?)\s*\d*$/.test(normalized);
+}
+
+function inferChatTitleFromMessages(messages: ParsedMessage[]): string {
+  const distinct = new Map<string, string>();
+
+  for (const message of messages) {
+    if (message.messageKind !== "message") {
+      continue;
+    }
+    if (message.isMe) {
+      continue;
+    }
+    if (!message.normalizedSender || distinct.has(message.normalizedSender)) {
+      continue;
+    }
+    distinct.set(message.normalizedSender, message.sender);
+  }
+
+  const names = Array.from(distinct.values());
+  if (names.length === 0) {
+    return "";
+  }
+  if (names.length === 1) {
+    return names[0] || "";
+  }
+  if (names.length === 2) {
+    return `${names[0]} and ${names[1]}`;
+  }
+  return `${names[0]}, ${names[1]} + ${names.length - 2}`;
+}
+
+function clampMessagePageSize(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return 120;
+  }
+  return Math.max(1, Math.min(Math.floor(value as number), 250));
+}
+
+function clampOffset(value: number, maxOffset: number): number {
+  if (!Number.isFinite(value)) {
+    return maxOffset;
+  }
+  return Math.max(0, Math.min(Math.floor(value), maxOffset));
 }
 
 function buildMessageFingerprint(message: ParsedMessage): string {
@@ -497,19 +623,75 @@ function encryptBytes(input: Buffer, key: Buffer): Buffer {
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(input), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return Buffer.concat([Buffer.from([1]), iv, tag, encrypted]);
+  return Buffer.concat([Buffer.from([ENCRYPTED_BLOB_VERSION]), iv, tag, encrypted]);
 }
 
 function decryptBytes(input: Buffer, key: Buffer): Buffer {
-  if (input.length < 29 || input[0] !== 1) {
+  if (input.length < ENCRYPTED_BLOB_HEADER_LENGTH + ENCRYPTED_BLOB_TAG_LENGTH || input[0] !== ENCRYPTED_BLOB_VERSION) {
     throw new Error("Unsupported encrypted payload");
   }
-  const iv = input.subarray(1, 13);
-  const tag = input.subarray(13, 29);
-  const ciphertext = input.subarray(29);
+  const iv = input.subarray(1, ENCRYPTED_BLOB_HEADER_LENGTH);
+  const tag = input.subarray(
+    ENCRYPTED_BLOB_HEADER_LENGTH,
+    ENCRYPTED_BLOB_HEADER_LENGTH + ENCRYPTED_BLOB_TAG_LENGTH
+  );
+  const ciphertext = input.subarray(ENCRYPTED_BLOB_HEADER_LENGTH + ENCRYPTED_BLOB_TAG_LENGTH);
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+async function encryptFileToFile(inputPath: string, outputPath: string, key: Buffer): Promise<void> {
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, Buffer.alloc(0));
+  const iv = randomBytes(ENCRYPTED_BLOB_IV_LENGTH);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const output = createWriteStream(outputPath);
+  output.write(Buffer.concat([Buffer.from([ENCRYPTED_BLOB_VERSION]), iv]));
+  await pipeline(createReadStream(inputPath), cipher, output);
+  const handle = await open(outputPath, "a");
+  try {
+    await handle.writeFile(cipher.getAuthTag());
+  } finally {
+    await handle.close();
+  }
+}
+
+async function decryptFileToFile(inputPath: string, outputPath: string, key: Buffer): Promise<void> {
+  const { size } = await stat(inputPath);
+  if (size < ENCRYPTED_BLOB_HEADER_LENGTH + ENCRYPTED_BLOB_TAG_LENGTH) {
+    throw new Error("Unsupported encrypted payload");
+  }
+
+  const handle = await open(inputPath, "r");
+  const header = Buffer.alloc(ENCRYPTED_BLOB_HEADER_LENGTH);
+  const tag = Buffer.alloc(ENCRYPTED_BLOB_TAG_LENGTH);
+  try {
+    await handle.read(header, 0, header.length, 0);
+    await handle.read(tag, 0, tag.length, size - ENCRYPTED_BLOB_TAG_LENGTH);
+  } finally {
+    await handle.close();
+  }
+
+  if (header[0] !== ENCRYPTED_BLOB_VERSION) {
+    throw new Error("Unsupported encrypted payload");
+  }
+
+  const decipher = createDecipheriv("aes-256-gcm", key, header.subarray(1));
+  decipher.setAuthTag(tag);
+  const ciphertextStart = ENCRYPTED_BLOB_HEADER_LENGTH;
+  const ciphertextEnd = size - ENCRYPTED_BLOB_TAG_LENGTH - 1;
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, Buffer.alloc(0));
+  const ciphertextStream =
+    ciphertextEnd >= ciphertextStart
+      ? createReadStream(inputPath, {
+          start: ciphertextStart,
+          end: ciphertextEnd
+        })
+      : Readable.from([]);
+  await pipeline(ciphertextStream, decipher, createWriteStream(outputPath));
+  await stat(outputPath);
 }
 
 function encryptText(input: string, key: Buffer): string {
@@ -527,6 +709,10 @@ function tokeniseForSearch(input: string): string[] {
 
 function stripWhatsAppControlMarks(value: string): string {
   return value.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+}
+
+function normalizeTranscriptLine(value: string): string {
+  return stripWhatsAppControlMarks(value).replace(/^\uFEFF/, "");
 }
 
 function classifyHistoricalEvent(
@@ -650,9 +836,26 @@ async function streamToBuffer(body: unknown): Promise<Buffer> {
   throw new Error("Unsupported blob response body");
 }
 
+async function streamToFile(body: unknown, targetPath: string): Promise<void> {
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  if (body instanceof Readable) {
+    await pipeline(body, createWriteStream(targetPath));
+    return;
+  }
+  if (body && typeof body === "object" && "transformToByteArray" in body) {
+    const bytes = await (body as { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray();
+    await writeFile(targetPath, bytes);
+    return;
+  }
+  throw new Error("Unsupported blob response body");
+}
+
 export interface BlobStorage {
   put(key: string, content: Buffer, metadata?: Record<string, string>): Promise<BlobPointer>;
   get(pointer: BlobPointer): Promise<Buffer>;
+  putFile(key: string, filePath: string, metadata?: Record<string, string>): Promise<BlobPointer>;
+  getToFile(pointer: BlobPointer, targetPath: string): Promise<void>;
+  delete(pointer: BlobPointer): Promise<void>;
 }
 
 class LocalBlobStorage implements BlobStorage {
@@ -674,6 +877,29 @@ class LocalBlobStorage implements BlobStorage {
 
   async get(pointer: BlobPointer): Promise<Buffer> {
     return readFile(path.join(this.root, pointer.blobKey));
+  }
+
+  async putFile(key: string, filePath: string, metadata?: Record<string, string>): Promise<BlobPointer> {
+    const finalPath = path.join(this.root, key);
+    await mkdir(path.dirname(finalPath), { recursive: true });
+    await copyFile(filePath, finalPath);
+    return {
+      storageDriver: "local",
+      blobKey: key,
+      metadata: JSON.stringify({
+        ...metadata,
+        relativePath: key
+      })
+    };
+  }
+
+  async getToFile(pointer: BlobPointer, targetPath: string): Promise<void> {
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    await copyFile(path.join(this.root, pointer.blobKey), targetPath);
+  }
+
+  async delete(pointer: BlobPointer): Promise<void> {
+    await rm(path.join(this.root, pointer.blobKey), { force: true });
   }
 }
 
@@ -729,6 +955,54 @@ class S3BlobStorage implements BlobStorage {
       })
     );
     return streamToBuffer(response.Body);
+  }
+
+  async putFile(key: string, filePath: string, metadata?: Record<string, string>): Promise<BlobPointer> {
+    if (!this.config.s3Bucket) {
+      throw new Error("S3_BUCKET is required when BLOB_DRIVER=s3");
+    }
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.config.s3Bucket,
+        Key: key,
+        Body: createReadStream(filePath),
+        Metadata: metadata
+      })
+    );
+    return {
+      storageDriver: "s3",
+      blobKey: key,
+      metadata: JSON.stringify({
+        ...metadata,
+        bucket: this.config.s3Bucket,
+        region: this.config.s3Region || ""
+      })
+    };
+  }
+
+  async getToFile(pointer: BlobPointer, targetPath: string): Promise<void> {
+    if (!this.config.s3Bucket) {
+      throw new Error("S3_BUCKET is required when BLOB_DRIVER=s3");
+    }
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.config.s3Bucket,
+        Key: pointer.blobKey
+      })
+    );
+    await streamToFile(response.Body, targetPath);
+  }
+
+  async delete(pointer: BlobPointer): Promise<void> {
+    if (!this.config.s3Bucket) {
+      throw new Error("S3_BUCKET is required when BLOB_DRIVER=s3");
+    }
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.config.s3Bucket,
+        Key: pointer.blobKey
+      })
+    );
   }
 }
 
@@ -876,55 +1150,162 @@ function extractAttachmentCandidates(content: string): string[] {
   return Array.from(matches);
 }
 
-export async function parseWhatsAppArchive(
-  fileName: string,
-  input: Buffer,
-  selfDisplayName?: string
-): Promise<ParsedArchive> {
-  let transcriptText = "";
-  let transcriptName = path.basename(fileName);
-  let chatTitle = deriveChatTitle(fileName);
-  const attachmentMap = new Map<string, AttachmentRecord>();
-  const lowerName = fileName.toLowerCase();
-  let withMedia = false;
+function isSkippableZipEntry(entryName: string): boolean {
+  return entryName.startsWith("__MACOSX");
+}
 
-  if (lowerName.endsWith(".zip")) {
-    const zip = await JSZip.loadAsync(input);
-    const transcriptEntry = Object.values(zip.files).find(
-      (entry) => !entry.dir && entry.name.toLowerCase().endsWith(".txt") && !entry.name.startsWith("__MACOSX")
+function openZipFile(zipPath: string): Promise<ZipFile> {
+  return new Promise((resolve, reject) => {
+    yauzl.open(
+      zipPath,
+      {
+        lazyEntries: true,
+        autoClose: false
+      },
+      (error, zipFile) => {
+        if (error || !zipFile) {
+          reject(error || new Error("Unable to open ZIP archive"));
+          return;
+        }
+        resolve(zipFile);
+      }
     );
-    if (!transcriptEntry) {
-      throw new Error("ZIP export does not include a WhatsApp transcript .txt");
+  });
+}
+
+function nextZipEntry(zipFile: ZipFile): Promise<ZipEntry | null> {
+  return new Promise((resolve, reject) => {
+    const onEntry = (entry: ZipEntry) => {
+      cleanup();
+      resolve(entry);
+    };
+    const onEnd = () => {
+      cleanup();
+      resolve(null);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      zipFile.off("entry", onEntry);
+      zipFile.off("end", onEnd);
+      zipFile.off("error", onError);
+    };
+    zipFile.once("entry", onEntry);
+    zipFile.once("end", onEnd);
+    zipFile.once("error", onError);
+    zipFile.readEntry();
+  });
+}
+
+function openZipEntryStream(zipFile: ZipFile, entry: ZipEntry): Promise<Readable> {
+  return new Promise((resolve, reject) => {
+    zipFile.openReadStream(entry, (error, stream) => {
+      if (error || !stream) {
+        reject(error || new Error(`Unable to read ZIP entry ${entry.fileName}`));
+        return;
+      }
+      resolve(stream);
+    });
+  });
+}
+
+async function readZipEntryBuffer(zipPath: string, entryName: string): Promise<Buffer> {
+  const zipFile = await openZipFile(zipPath);
+  try {
+    let matchedEntry: ZipEntry | null = null;
+    while (true) {
+      const entry = await nextZipEntry(zipFile);
+      if (!entry) {
+        break;
+      }
+      if (entry.fileName === entryName) {
+        matchedEntry = entry;
+        break;
+      }
     }
-    transcriptName = path.basename(transcriptEntry.name);
-    chatTitle = deriveChatTitle(transcriptEntry.name) || deriveChatTitle(fileName);
-    transcriptText = await transcriptEntry.async("string");
+    if (!matchedEntry) {
+      throw new Error(`ZIP export is missing attachment ${path.basename(entryName)}`);
+    }
+    const stream = await openZipEntryStream(zipFile, matchedEntry);
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      stream.once("end", () => resolve());
+      stream.once("error", reject);
+    });
+    return Buffer.concat(chunks);
+  } finally {
+    zipFile.close();
+  }
+}
 
-    const attachmentEntries = Object.values(zip.files).filter(
-      (entry) => !entry.dir && entry.name !== transcriptEntry.name && !entry.name.startsWith("__MACOSX")
-    );
-    withMedia = attachmentEntries.length > 0;
-    for (const entry of attachmentEntries) {
-      const data = await entry.async("nodebuffer");
-      const baseName = path.basename(entry.name);
+async function scanZipArchive(fileName: string, zipPath: string) {
+  const zipFile = await openZipFile(zipPath);
+  try {
+    let transcriptEntryName: string | null = null;
+    let transcriptName = path.basename(fileName);
+    let chatTitle = deriveChatTitle(fileName);
+    const attachmentMap = new Map<string, AttachmentRecord>();
+    let withMedia = false;
+
+    while (true) {
+      const entry = await nextZipEntry(zipFile);
+      if (!entry) {
+        break;
+      }
+      if (/\/$/.test(entry.fileName) || isSkippableZipEntry(entry.fileName)) {
+        continue;
+      }
+      if (!transcriptEntryName && entry.fileName.toLowerCase().endsWith(".txt")) {
+        transcriptEntryName = entry.fileName;
+        transcriptName = path.basename(entry.fileName);
+        chatTitle = deriveChatTitle(entry.fileName) || deriveChatTitle(fileName);
+        continue;
+      }
+
+      withMedia = true;
+      const baseName = path.basename(entry.fileName);
       attachmentMap.set(normalizeKey(baseName), {
         fileName: baseName,
         normalizedName: normalizeKey(baseName),
-        archivePath: entry.name,
-        buffer: data,
-        contentSha256: sha256Hex(data),
-        byteSize: data.byteLength,
+        archivePath: entry.fileName,
+        sourceArchiveFilePath: zipPath,
+        byteSize: entry.uncompressedSize,
         mimeType: mime.lookup(baseName) || "application/octet-stream",
         placeholderText: null
       });
     }
-  } else {
-    transcriptText = input.toString("utf8");
-  }
 
+    if (!transcriptEntryName) {
+      throw new Error("ZIP export does not include a WhatsApp transcript .txt");
+    }
+
+    return {
+      transcriptEntryName,
+      transcriptName,
+      chatTitle,
+      attachmentMap,
+      withMedia
+    };
+  } finally {
+    zipFile.close();
+  }
+}
+
+async function parseTranscriptInput(
+  input: AsyncIterable<string>,
+  transcriptName: string,
+  chatTitle: string,
+  attachmentMap: Map<string, AttachmentRecord>,
+  withMedia: boolean,
+  selfDisplayName?: string
+): Promise<ParsedArchive> {
   const regex =
-    /^\[?(\d{1,4}[/-]\d{1,2}[/-]\d{1,4},?\s\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]?\s(?:-\s)?([^:]+):\s(.*)$/;
-  const lines = transcriptText.split(/\r?\n/);
+    /^\[?(\d{1,4}[/-]\d{1,2}[/-]\d{1,4},?\s\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]?\s*(?:-\s*)?([^:]+):\s?(.*)$/;
   const rawMessages: Array<{
     rawTimestampLabel: string;
     sender: string;
@@ -932,8 +1313,9 @@ export async function parseWhatsAppArchive(
   }> = [];
   let lastMessage: (typeof rawMessages)[number] | null = null;
 
-  for (const line of lines) {
-    const match = line.match(regex);
+  for await (const line of input) {
+    const normalizedLine = normalizeTranscriptLine(line);
+    const match = normalizedLine.match(regex);
     if (match) {
       const [, rawTimestampLabel, sender, content] = match;
       const message = {
@@ -946,7 +1328,7 @@ export async function parseWhatsAppArchive(
       continue;
     }
     if (lastMessage) {
-      lastMessage.content += `\n${line}`;
+      lastMessage.content += `\n${normalizedLine}`;
     }
   }
 
@@ -976,13 +1358,141 @@ export async function parseWhatsAppArchive(
     };
   });
 
+  const resolvedChatTitle =
+    isGenericChatTitle(chatTitle) || !chatTitle ? inferChatTitleFromMessages(messages) || "Untitled chat" : chatTitle;
+
   return {
-    chatTitle: chatTitle || "Untitled chat",
-    normalizedChatTitle: normalizeKey(chatTitle || "Untitled chat"),
+    chatTitle: resolvedChatTitle,
+    normalizedChatTitle: normalizeKey(resolvedChatTitle),
     transcriptName,
     withMedia,
     messages
   };
+}
+
+async function parseTranscriptText(
+  transcriptText: string,
+  transcriptName: string,
+  chatTitle: string,
+  attachmentMap: Map<string, AttachmentRecord>,
+  withMedia: boolean,
+  selfDisplayName?: string
+): Promise<ParsedArchive> {
+  async function* lines(): AsyncIterable<string> {
+    yield* transcriptText.split(/\r?\n/);
+  }
+
+  return parseTranscriptInput(lines(), transcriptName, chatTitle, attachmentMap, withMedia, selfDisplayName);
+}
+
+export async function parseWhatsAppArchive(
+  fileName: string,
+  input: Buffer,
+  selfDisplayName?: string
+): Promise<ParsedArchive> {
+  let transcriptText = "";
+  let transcriptName = path.basename(fileName);
+  let chatTitle = deriveChatTitle(fileName);
+  const attachmentMap = new Map<string, AttachmentRecord>();
+  const lowerName = fileName.toLowerCase();
+  let withMedia = false;
+
+  if (lowerName.endsWith(".zip")) {
+    const zip = await JSZip.loadAsync(input);
+    const transcriptEntry = Object.values(zip.files).find(
+      (entry) => !entry.dir && entry.name.toLowerCase().endsWith(".txt") && !isSkippableZipEntry(entry.name)
+    );
+    if (!transcriptEntry) {
+      throw new Error("ZIP export does not include a WhatsApp transcript .txt");
+    }
+    transcriptName = path.basename(transcriptEntry.name);
+    chatTitle = deriveChatTitle(transcriptEntry.name) || deriveChatTitle(fileName);
+    transcriptText = await transcriptEntry.async("string");
+
+    const attachmentEntries = Object.values(zip.files).filter(
+      (entry) => !entry.dir && entry.name !== transcriptEntry.name && !isSkippableZipEntry(entry.name)
+    );
+    withMedia = attachmentEntries.length > 0;
+    for (const entry of attachmentEntries) {
+      const data = await entry.async("nodebuffer");
+      const baseName = path.basename(entry.name);
+      attachmentMap.set(normalizeKey(baseName), {
+        fileName: baseName,
+        normalizedName: normalizeKey(baseName),
+        archivePath: entry.name,
+        buffer: data,
+        contentSha256: sha256Hex(data),
+        byteSize: data.byteLength,
+        mimeType: mime.lookup(baseName) || "application/octet-stream",
+        placeholderText: null
+      });
+    }
+  } else {
+    transcriptText = input.toString("utf8");
+  }
+
+  return parseTranscriptText(transcriptText, transcriptName, chatTitle, attachmentMap, withMedia, selfDisplayName);
+}
+
+export async function parseWhatsAppArchiveFile(
+  fileName: string,
+  filePath: string,
+  selfDisplayName?: string
+): Promise<ParsedArchive> {
+  if (!fileName.toLowerCase().endsWith(".zip")) {
+    const transcriptStream = createReadStream(filePath, { encoding: "utf8" });
+    const lines = createInterface({
+      input: transcriptStream,
+      crlfDelay: Infinity
+    });
+    return parseTranscriptInput(
+      lines,
+      path.basename(fileName),
+      deriveChatTitle(fileName),
+      new Map<string, AttachmentRecord>(),
+      false,
+      selfDisplayName
+    );
+  }
+
+  const { transcriptEntryName, transcriptName, chatTitle, attachmentMap, withMedia } = await scanZipArchive(
+    fileName,
+    filePath
+  );
+  const zipFile = await openZipFile(filePath);
+  try {
+    let transcriptEntry: ZipEntry | null = null;
+    while (true) {
+      const entry = await nextZipEntry(zipFile);
+      if (!entry) {
+        break;
+      }
+      if (entry.fileName === transcriptEntryName) {
+        transcriptEntry = entry;
+        break;
+      }
+    }
+    if (!transcriptEntry) {
+      throw new Error("ZIP export does not include a WhatsApp transcript .txt");
+    }
+
+    const transcriptStream = await openZipEntryStream(zipFile, transcriptEntry);
+    const lines = createInterface({
+      input: transcriptStream.setEncoding("utf8"),
+      crlfDelay: Infinity
+    });
+    const parsedArchive = await parseTranscriptInput(
+      lines,
+      transcriptName,
+      chatTitle,
+      attachmentMap,
+      withMedia,
+      selfDisplayName
+    );
+    return parsedArchive;
+  } finally {
+    zipFile.close();
+  }
 }
 
 export class ArchiveServices {
@@ -1135,9 +1645,9 @@ export class ArchiveServices {
       this.options.db,
       `INSERT INTO imports (
         id, owner_id, status, file_name, file_sha256, source_blob_key, source_blob_storage,
-        source_blob_metadata, source_size, source_chat_title, normalized_chat_title, import_options
+        source_blob_metadata, source_size, source_chat_title, normalized_chat_title, import_options, progress_state
       )
-      VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *`,
       [
         id,
@@ -1152,7 +1662,11 @@ export class ArchiveServices {
         normalizeKey(sourceChatTitle),
         JSON.stringify({
           selfDisplayName: options.selfDisplayName?.trim() || ""
-        })
+        }),
+        JSON.stringify({
+          task: "Queued",
+          percent: 0
+        } satisfies ImportProgress)
       ]
     );
     if (!row) {
@@ -1180,24 +1694,39 @@ export class ArchiveServices {
       throw error;
     }
 
-    const content = await readFile(filePath);
     const id = randomUUID();
-    const sourceBlob = await this.options.storage.put(
-      `imports/${ownerId}/${id}.bin`,
-      encryptBytes(content, this.options.config.encryptionKey),
-      {
-        kind: "source",
-        fileName: path.basename(fileName)
+    let sourceBlob: BlobPointer;
+    if (size > 2 * 1024 ** 3) {
+      const tempDir = await mkdtemp(path.join(this.options.config.uploadTmpDir, "import-source-"));
+      try {
+        const encryptedImportPath = path.join(tempDir, `${id}.bin`);
+        await encryptFileToFile(filePath, encryptedImportPath, this.options.config.encryptionKey);
+        sourceBlob = await this.options.storage.putFile(`imports/${ownerId}/${id}.bin`, encryptedImportPath, {
+          kind: "source",
+          fileName: path.basename(fileName)
+        });
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
       }
-    );
+    } else {
+      const content = await readFile(filePath);
+      sourceBlob = await this.options.storage.put(
+        `imports/${ownerId}/${id}.bin`,
+        encryptBytes(content, this.options.config.encryptionKey),
+        {
+          kind: "source",
+          fileName: path.basename(fileName)
+        }
+      );
+    }
     const sourceChatTitle = deriveChatTitle(fileName) || "Untitled chat";
     const row = await fetchOne<ImportRow>(
       this.options.db,
       `INSERT INTO imports (
         id, owner_id, status, file_name, file_sha256, source_blob_key, source_blob_storage,
-        source_blob_metadata, source_size, source_chat_title, normalized_chat_title, import_options
+        source_blob_metadata, source_size, source_chat_title, normalized_chat_title, import_options, progress_state
       )
-      VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *`,
       [
         id,
@@ -1212,7 +1741,11 @@ export class ArchiveServices {
         normalizeKey(sourceChatTitle),
         JSON.stringify({
           selfDisplayName: options.selfDisplayName?.trim() || ""
-        })
+        }),
+        JSON.stringify({
+          task: "Queued",
+          percent: 0
+        } satisfies ImportProgress)
       ]
     );
     if (!row) {
@@ -1237,6 +1770,74 @@ export class ArchiveServices {
       [ownerId, importId]
     );
     return row ? this.serializeImport(row) : null;
+  }
+
+  async retryImport(ownerId: string, importId: string, options: CreateImportOptions = {}) {
+    const row = await fetchOne<ImportRow>(
+      this.options.db,
+      "SELECT * FROM imports WHERE owner_id = $1 AND id = $2",
+      [ownerId, importId]
+    );
+    if (!row) {
+      return null;
+    }
+    if (row.status !== "failed") {
+      throw new ImportActionError(409, "Only failed imports can be retried");
+    }
+
+    const previousOptions = parseJson<{ selfDisplayName?: string }>(row.import_options, {});
+    const nextSelfDisplayName = options.selfDisplayName?.trim() || previousOptions.selfDisplayName?.trim() || "";
+    const updated = await fetchOne<ImportRow>(
+      this.options.db,
+      `UPDATE imports
+       SET status = 'pending',
+           error_message = NULL,
+           completed_at = NULL,
+           progress_state = $4,
+           parse_summary = '{}'::jsonb,
+           import_options = $3,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE owner_id = $1 AND id = $2
+       RETURNING *`,
+      [
+        ownerId,
+        importId,
+        JSON.stringify({
+          selfDisplayName: nextSelfDisplayName
+        }),
+        JSON.stringify({
+          task: "Queued",
+          percent: 0
+        })
+      ]
+    );
+    if (!updated) {
+      return null;
+    }
+    this.kickWorker();
+    return this.serializeImport(updated);
+  }
+
+  async clearImport(ownerId: string, importId: string) {
+    const row = await fetchOne<ImportRow>(
+      this.options.db,
+      "SELECT * FROM imports WHERE owner_id = $1 AND id = $2",
+      [ownerId, importId]
+    );
+    if (!row) {
+      return false;
+    }
+    if (row.status !== "failed") {
+      throw new ImportActionError(409, "Only failed imports can be cleared");
+    }
+
+    await this.options.storage.delete({
+      storageDriver: row.source_blob_storage,
+      blobKey: row.source_blob_key,
+      metadata: row.source_blob_metadata
+    });
+    await this.options.db.query("DELETE FROM imports WHERE owner_id = $1 AND id = $2", [ownerId, importId]);
+    return true;
   }
 
   async listChats(ownerId: string) {
@@ -1302,17 +1903,47 @@ export class ArchiveServices {
     };
   }
 
-  async getChatMessages(ownerId: string, chatId: string) {
+  async getChatMessages(ownerId: string, chatId: string, options: GetChatMessagesOptions = {}): Promise<ChatMessagesPage> {
+    const totalRow = await fetchOne<QueryResultRow>(
+      this.options.db,
+      "SELECT COUNT(*)::int AS total FROM messages WHERE owner_id = $1 AND chat_id = $2",
+      [ownerId, chatId]
+    );
+    const total = Number(totalRow?.total || 0);
+    const limit = clampMessagePageSize(options.limit);
+    const maxOffset = Math.max(total - limit, 0);
+    let startOffset = maxOffset;
+
+    if (options.aroundMessageId) {
+      const aroundRow = await fetchOne<QueryResultRow>(
+        this.options.db,
+        `SELECT message_offset
+         FROM (
+           SELECT id, ROW_NUMBER() OVER (ORDER BY COALESCE(message_timestamp, created_at), created_at) - 1 AS message_offset
+           FROM messages
+           WHERE owner_id = $1 AND chat_id = $2
+         ) ranked
+         WHERE id = $3`,
+        [ownerId, chatId, options.aroundMessageId]
+      );
+      if (aroundRow?.message_offset !== undefined) {
+        startOffset = clampOffset(Number(aroundRow.message_offset) - Math.floor(limit / 2), maxOffset);
+      }
+    } else if (options.beforeOffset !== undefined) {
+      startOffset = clampOffset(options.beforeOffset, maxOffset);
+    }
+
     const messagesResult = await this.options.db.query<MessageRow>(
       `SELECT *
        FROM messages
        WHERE owner_id = $1 AND chat_id = $2
-       ORDER BY COALESCE(message_timestamp, created_at), created_at`,
-      [ownerId, chatId]
+       ORDER BY COALESCE(message_timestamp, created_at), created_at
+       LIMIT $3 OFFSET $4`,
+      [ownerId, chatId, limit, startOffset]
     );
     const messageIds = messagesResult.rows.map((row: MessageRow) => row.id);
     const attachmentsByMessageId = await this.loadAttachmentsByMessageIds(ownerId, messageIds);
-    return messagesResult.rows.map((row: MessageRow) => ({
+    const messages = messagesResult.rows.map((row: MessageRow) => ({
       id: row.id,
       chatId: row.chat_id,
       sender: row.sender_name,
@@ -1324,8 +1955,21 @@ export class ArchiveServices {
       messageKind: row.message_kind,
       eventType: row.event_type,
       hasAttachments: row.has_attachments,
-      attachments: attachmentsByMessageId.get(row.id) || []
+      attachments: (attachmentsByMessageId.get(row.id) || []) as AttachmentRecordSummary[]
     }));
+    const hasOlder = startOffset > 0;
+    const hasNewer = startOffset + messages.length < total;
+    return {
+      messages,
+      page: {
+        total,
+        limit,
+        startOffset,
+        hasOlder,
+        hasNewer,
+        nextOlderOffset: hasOlder ? Math.max(startOffset - limit, 0) : null
+      }
+    };
   }
 
   async searchChat(ownerId: string, chatId: string, query: string) {
@@ -1466,7 +2110,7 @@ export class ArchiveServices {
         const nextImport = await fetchOne<ImportRow>(
           this.options.db,
           `UPDATE imports
-           SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+           SET status = 'processing', progress_state = $1, updated_at = CURRENT_TIMESTAMP
            WHERE id = (
              SELECT id
              FROM imports
@@ -1475,7 +2119,12 @@ export class ArchiveServices {
              LIMIT 1
            )
            RETURNING *`,
-          []
+          [
+            JSON.stringify({
+              task: "Preparing import",
+              percent: 2
+            } satisfies ImportProgress)
+          ]
         );
         if (!nextImport) {
           break;
@@ -1486,9 +2135,20 @@ export class ArchiveServices {
           const message = error instanceof Error ? error.message : "Unknown import error";
           await this.options.db.query(
             `UPDATE imports
-             SET status = 'failed', error_message = $2, updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
+             SET status = 'failed',
+                 error_message = $2,
+                 progress_state = $3,
+                 updated_at = CURRENT_TIMESTAMP,
+                 completed_at = CURRENT_TIMESTAMP
              WHERE id = $1`,
-            [nextImport.id, message]
+            [
+              nextImport.id,
+              message,
+              JSON.stringify({
+                task: "Import failed",
+                percent: 0
+              } satisfies ImportProgress)
+            ]
           );
           this.options.logger.error({ err: error, importId: nextImport.id }, "Failed to process import");
         }
@@ -1517,19 +2177,59 @@ export class ArchiveServices {
   }
 
   private async processImport(importRow: ImportRow): Promise<void> {
-    const encryptedSource = await this.options.storage.get({
-      storageDriver: importRow.source_blob_storage,
-      blobKey: importRow.source_blob_key,
-      metadata: importRow.source_blob_metadata
-    });
-    const sourceBuffer = decryptBytes(encryptedSource, this.options.config.encryptionKey);
     const importOptions = parseJson<{ selfDisplayName?: string }>(importRow.import_options, {});
-    const parsedArchive = await parseWhatsAppArchive(
-      importRow.file_name,
-      sourceBuffer,
-      importOptions.selfDisplayName
-    );
+    const sourceSize = Number(importRow.source_size);
+    let lastReportedProgress = "";
+    const reportProgress = async (task: string, percent: number) => {
+      const next = JSON.stringify({
+        task,
+        percent: Math.max(0, Math.min(100, Math.round(percent)))
+      } satisfies ImportProgress);
+      if (next === lastReportedProgress) {
+        return;
+      }
+      lastReportedProgress = next;
+      await this.options.db.query(
+        `UPDATE imports
+         SET progress_state = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [importRow.id, next]
+      );
+    };
 
+    await reportProgress("Loading source", 8);
+    let tempDir: string | null = null;
+    let parsedArchive: ParsedArchive;
+    if (Number.isFinite(sourceSize) && sourceSize > 2 * 1024 ** 3) {
+      await reportProgress("Downloading source", 12);
+      tempDir = await mkdtemp(path.join(this.options.config.uploadTmpDir, "import-process-"));
+      const encryptedSourcePath = path.join(tempDir, `${importRow.id}.enc`);
+      const sourcePath = path.join(tempDir, `source${path.extname(importRow.file_name) || ".bin"}`);
+      await this.options.storage.getToFile(
+        {
+          storageDriver: importRow.source_blob_storage,
+          blobKey: importRow.source_blob_key,
+          metadata: importRow.source_blob_metadata
+        },
+        encryptedSourcePath
+      );
+      await reportProgress("Decrypting source", 20);
+      await decryptFileToFile(encryptedSourcePath, sourcePath, this.options.config.encryptionKey);
+      await reportProgress("Parsing archive", 32);
+      parsedArchive = await parseWhatsAppArchiveFile(importRow.file_name, sourcePath, importOptions.selfDisplayName);
+    } else {
+      const encryptedSource = await this.options.storage.get({
+        storageDriver: importRow.source_blob_storage,
+        blobKey: importRow.source_blob_key,
+        metadata: importRow.source_blob_metadata
+      });
+      await reportProgress("Decrypting source", 20);
+      const sourceBuffer = decryptBytes(encryptedSource, this.options.config.encryptionKey);
+      await reportProgress("Parsing archive", 32);
+      parsedArchive = await parseWhatsAppArchive(importRow.file_name, sourceBuffer, importOptions.selfDisplayName);
+    }
+
+    await reportProgress("Preparing records", 42);
     const client = await this.options.db.connect();
     try {
       await client.query("BEGIN");
@@ -1538,8 +2238,10 @@ export class ArchiveServices {
       let messagesInserted = 0;
       let attachmentsLinked = 0;
       let attachmentsStored = 0;
+      const totalMessages = Math.max(parsedArchive.messages.length, 1);
 
-      for (const parsedMessage of parsedArchive.messages) {
+      for (const [messageIndex, parsedMessage] of parsedArchive.messages.entries()) {
+        await reportProgress("Saving messages", 45 + ((messageIndex + 1) / totalMessages) * 50);
         let participant: ParticipantRow | null = null;
         if (parsedMessage.normalizedSender) {
           participant = await this.upsertParticipant(
@@ -1638,6 +2340,7 @@ export class ArchiveServices {
         }
       }
 
+      await reportProgress("Finalizing import", 98);
       await client.query(
       `UPDATE chats
          SET updated_at = CURRENT_TIMESTAMP, last_import_id = $2
@@ -1650,6 +2353,7 @@ export class ArchiveServices {
              source_chat_title = $2,
              normalized_chat_title = $3,
              parse_summary = $4,
+             progress_state = $5,
              error_message = NULL,
              updated_at = CURRENT_TIMESTAMP,
              completed_at = CURRENT_TIMESTAMP
@@ -1666,7 +2370,11 @@ export class ArchiveServices {
             attachmentsStored,
             participants: participantCache.size,
             withMedia: parsedArchive.withMedia
-          } satisfies ImportSummary)
+          } satisfies ImportSummary),
+          JSON.stringify({
+            task: "Completed",
+            percent: 100
+          } satisfies ImportProgress)
         ]
       );
       await client.query("COMMIT");
@@ -1675,6 +2383,9 @@ export class ArchiveServices {
       throw error;
     } finally {
       client.release();
+      if (tempDir) {
+        await rm(tempDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -1742,7 +2453,7 @@ export class ArchiveServices {
     attachment: AttachmentRecord
   ) {
     const attachmentFingerprint = buildAttachmentFingerprint(attachment);
-    if (!attachment.buffer || !attachment.contentSha256) {
+    if (!attachment.buffer && !(attachment.sourceArchiveFilePath && attachment.archivePath)) {
       return {
         fileName: attachment.fileName,
         normalizedName: attachment.normalizedName,
@@ -1758,13 +2469,17 @@ export class ArchiveServices {
       };
     }
 
+    const data =
+      attachment.buffer || (await readZipEntryBuffer(attachment.sourceArchiveFilePath!, attachment.archivePath!));
+    const contentSha256 = attachment.contentSha256 || sha256Hex(data);
+
     const existing = await fetchOne<AttachmentRow>(
       this.options.db,
       `SELECT *
        FROM attachments
        WHERE owner_id = $1 AND content_sha256 = $2 AND blob_key IS NOT NULL
        LIMIT 1`,
-      [ownerId, attachment.contentSha256]
+      [ownerId, contentSha256]
     );
     if (existing) {
       return {
@@ -1772,7 +2487,7 @@ export class ArchiveServices {
         normalizedName: attachment.normalizedName,
         mimeType: existing.mime_type || attachment.mimeType,
         byteSize: attachment.byteSize,
-        contentSha256: attachment.contentSha256,
+        contentSha256,
         storageDriver: existing.storage_driver,
         blobKey: existing.blob_key,
         blobMetadata: existing.blob_metadata,
@@ -1783,8 +2498,8 @@ export class ArchiveServices {
     }
 
     const pointer = await this.options.storage.put(
-      `attachments/${ownerId}/${chatId}/${messageId}-${attachment.contentSha256}`,
-      encryptBytes(attachment.buffer, this.options.config.encryptionKey),
+      `attachments/${ownerId}/${chatId}/${messageId}-${contentSha256}`,
+      encryptBytes(data, this.options.config.encryptionKey),
       {
         kind: "attachment",
         fileName: attachment.fileName
@@ -1795,7 +2510,7 @@ export class ArchiveServices {
       normalizedName: attachment.normalizedName,
       mimeType: attachment.mimeType,
       byteSize: attachment.byteSize,
-      contentSha256: attachment.contentSha256,
+      contentSha256,
       storageDriver: pointer.storageDriver,
       blobKey: pointer.blobKey,
       blobMetadata: pointer.metadata,
@@ -1927,6 +2642,7 @@ export class ArchiveServices {
       createdAt: safeDate(row.created_at),
       updatedAt: safeDate(row.updated_at),
       completedAt: toIso(row.completed_at),
+      progress: parseJson<ImportProgress | ParsedJsonObject>(row.progress_state, {}),
       parseSummary: parseJson<ImportSummary | ParsedJsonObject>(row.parse_summary, {}),
       errorMessage: row.error_message
     };

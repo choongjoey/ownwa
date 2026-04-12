@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev --workspace @ownwa/server\" \"npm run dev --workspace @ownwa/client\"",
     "build": "npm run build --workspace @ownwa/server && npm run build --workspace @ownwa/client",
-    "test": "npm run test --workspace @ownwa/server"
+    "test": "npm run test --workspace @ownwa/server",
+    "db:clear": "npm run db:clear --workspace @ownwa/server"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

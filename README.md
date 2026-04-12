@@ -1,130 +1,258 @@
 # ownwa
 
-Personal WhatsApp archive with per-user accounts, encrypted storage, deduplicated imports, and a WhatsApp-style viewer.
+`ownwa` is a self-hosted WhatsApp archive viewer built around manual WhatsApp exports. It takes `.txt` transcripts and `.zip` exports, stores the source material as encrypted blobs, parses the chat history into a searchable relational model, and presents it in a WhatsApp-style reading experience.
 
-## Product Intent
+The app is intentionally split into two layers:
 
-`ownwa` is built to make manual WhatsApp exports feel like a real messaging app again.
+- a React client for archive browsing, search, import management, and chat reading
+- a Node/Express API that handles authentication, ingestion, persistence, search indexing, and attachment delivery
 
-- The main experience is a WhatsApp-like split view: conversation list on the left, active transcript on the right.
-- Chat and group names default from the archive filename or transcript filename, including `WhatsApp Chat with {name}` and `WhatsApp Chat - {name}` exports.
-- Full-text search runs across all chats, including historical WhatsApp notices and call events.
-- Historical rows such as encryption notices, contact notices, and voice/video call history render as centered event bubbles instead of sender messages.
-- Photos, videos, GIFs, and stickers render inline in the transcript. Clicking media opens a fullscreen viewer, and videos support inline playback and seeking.
-- Your own sender name is stored once as a global per-user setting and applied automatically to new imports.
+## What The App Does
 
-## Core Behaviors
+- Supports per-user accounts, so each user has an isolated archive.
+- Accepts WhatsApp `.txt` exports and `.zip` exports with media.
+- Stores uploaded source archives as encrypted blobs before processing.
+- Parses messages, attachments, event rows, and inferred metadata into PostgreSQL.
+- Deduplicates imports by archive hash and deduplicates attachments by content hash.
+- Marks outgoing messages based on each user’s saved WhatsApp display name.
+- Renders chats in a WhatsApp-like split view with inline image, sticker, and video previews.
+- Supports global search and chat-scoped search without storing raw search tokens.
+- Tracks import progress with task labels and percentages.
 
-- Imports are owner-scoped and deduplicated by archive hash.
-- Attachments are owner-scoped and deduplicated by content hash, so repeated photos, videos, GIFs, and stickers are stored once per user.
-- Messages and imported blobs are encrypted at rest before storage.
-- Search indexes token hashes instead of raw plaintext terms.
-- Large uploads are written to disk first and support a default 10 GB limit in local and Docker-based setups.
+## Documentation
 
-## Stack
+Detailed internal documentation lives in `docs/`:
 
-- React + Vite + Tailwind
-- Node + Express + pino
-- PostgreSQL
+- [Tech stack](./docs/tech-stack.md)
+- [Database schema](./docs/db-schema.md)
+- [Import and processing pipeline](./docs/import-pipeline.md)
 
-## Development
+If you want the fastest high-level understanding, read this README first and then jump to the pipeline doc.
+
+## Product Model
+
+At a high level, `ownwa` works like this:
+
+1. A user uploads a WhatsApp export through the client.
+2. The API writes the upload to temporary disk, hashes it, encrypts it, and stores it as a source blob.
+3. An `imports` row is created with status and progress metadata.
+4. A background worker picks up pending imports.
+5. The worker decrypts the source, parses the transcript, upserts chats and participants, inserts deduplicated messages, stores deduplicated attachments, and creates hashed search tokens.
+6. The client polls import endpoints and shows progress until the import completes or fails.
+
+## Monorepo Layout
+
+```text
+.
+├── apps/
+│   ├── client/   # React + Vite frontend
+│   └── server/   # Express API, import worker, parser, storage logic
+├── docs/         # Architecture and implementation docs
+├── docker-compose.yml
+└── README.md
+```
+
+Important server files:
+
+- `apps/server/src/app.ts`: HTTP API wiring, auth/session middleware, route registration, upload handling.
+- `apps/server/src/lib.ts`: schema, migrations, parsing, storage, encryption, search, and the import worker.
+- `apps/server/tests/`: API, parser, and worker coverage.
+
+Important client files:
+
+- `apps/client/src/App.tsx`: primary application shell, routing, archive workspace, import UI, and import detail UI.
+- `apps/client/src/index.css`: visual system and Tailwind-driven styling.
+
+## Tech Stack Summary
+
+Frontend:
+
+- React 19
+- React Router 7
+- Vite
+- Tailwind CSS
+- TypeScript
+
+Backend:
+
+- Node.js
+- Express 5
+- PostgreSQL via `pg`
+- Multer for multipart upload handling
+- Pino + `pino-http` for logging
+- Zod for request validation
+
+Import and storage:
+
+- `jszip` for in-memory zip parsing
+- `yauzl` for file-based zip scanning on large archives
+- AES-GCM encryption implemented in app code
+- Local filesystem or S3-compatible object storage for encrypted blobs
+
+Testing and local development:
+
+- Vitest
+- Supertest
+- `pg-mem` for in-memory DB-backed tests
+- Docker Compose for full-stack local runs
+
+The detailed rationale for each layer is in [docs/tech-stack.md](./docs/tech-stack.md).
+
+## Core Domain Concepts
+
+### User
+
+A registered account with:
+
+- a username
+- a password hash
+- a saved `selfDisplayName`
+- one or more login sessions
+
+The saved display name is important because imports use it to classify which parsed messages should be marked as `isMe`.
+
+### Import
+
+An import is the lifecycle record for one uploaded export. It keeps:
+
+- source file metadata
+- source blob storage location
+- progress and status
+- parse summary
+- error state when processing fails
+
+Imports are owner-scoped and deduplicated by archive SHA-256.
+
+### Chat
+
+A chat is the normalized logical conversation in the archive. Chats keep both:
+
+- `source_title`: the best title derived from the import
+- `display_title`: the current user-visible title, which can be renamed
+
+### Message
+
+Messages are normalized rows extracted from a transcript. A message may be:
+
+- a normal sender message
+- a WhatsApp event/system row
+- a call history row
+
+Each message also carries a deterministic fingerprint so overlapping imports do not create duplicate rows.
+
+### Attachment
+
+Attachments represent media or files referenced by messages. Blob storage is content-hash deduplicated per owner, while attachment rows remain message-specific so the same stored blob can appear in multiple messages.
+
+## Features And Behaviors
+
+### Archive browsing
+
+- Split-view layout with conversation list on the left and transcript on the right.
+- Chat rename support without changing original source titles.
+- Empty states for first-run and sparse archives.
+
+### Search
+
+- Global search across chats.
+- Chat-scoped search within a single conversation.
+- Search token hashing before persistence, so plaintext terms are not stored in the DB.
+
+### Imports
+
+- `.txt` and `.zip` support.
+- Progress reporting with task labels and percentages.
+- Retry and clear actions for failed imports.
+- Large-file flow that avoids fully loading very large archives into memory.
+
+### Media handling
+
+- Inline previews for images, stickers, and videos.
+- Attachment delivery through authenticated API endpoints.
+- Range request support for streamed media playback and seeking.
+
+## Security Model
+
+`ownwa` is designed for a self-hosted environment, but it still takes a defense-in-depth approach:
+
+- Passwords are hashed with Argon2id.
+- Sessions are stored server-side and issued as HTTP-only cookies.
+- Message bodies are encrypted before being written to PostgreSQL.
+- Source archives and attachment blobs are encrypted before being written to local disk or S3.
+- Search indexes store token HMACs rather than raw terms.
+- Imports, chats, messages, attachments, and search tokens are all owner-scoped in queries.
+
+This is not a zero-knowledge system. The server process can decrypt data because it holds the application encryption key.
+
+## Running The App
+
+### Local development
 
 1. Copy `.env.example` to `.env`.
-2. Start PostgreSQL and create the database in `DATABASE_URL`.
-3. Install dependencies with `npm install`.
-4. Run `npm run dev`.
+2. Start PostgreSQL and create the database referenced by `DATABASE_URL`.
+3. Install dependencies:
 
-The server runs on `http://localhost:4000` and the client on `http://localhost:5173`.
+```bash
+npm install
+```
 
-## Using The App
+4. Start the app:
 
-1. Register or log in.
-2. Set your global “your name in WhatsApp” value in the left sidebar. New imports use this to mark outgoing messages.
-3. Use the sidebar import button to open the import modal, then upload a `.txt` or `.zip` WhatsApp export.
-4. Open any chat from the left conversation list.
-5. Use the global search field to search across all chats and jump directly to matching messages.
+```bash
+npm run dev
+```
 
-The default archive screen is a split-view workspace rather than a dashboard:
+Default dev URLs:
 
-- the left rail holds import, search, your saved self-name, recent import activity, and conversation navigation
-- the right side shows either an empty transcript state, search results, or the active chat transcript
-- import detail pages reuse the same visual system as the main archive workspace
+- client: `http://localhost:5173`
+- server: `http://localhost:4000`
 
-### Transcript Rules
+### Docker Compose
 
-- Standard messages stay left/right aligned based on whether the sender matches your saved global self name.
-- Historical WhatsApp events render as centered bubbles.
-- Media attachments preview inline when they are image-, sticker-, or video-like formats that the browser can render.
-- Non-previewable attachments stay as file chips.
-
-### Chat Titles
-
-- Default title source: archive/transcript name.
-- Supported auto-derived patterns:
-  - `WhatsApp Chat with Alex.zip`
-  - `WhatsApp Chat - Project Room.zip`
-  - `Chat with Alex.txt`
-- Titles can be renamed in the chat header without changing the original imported source title.
-
-## Docker Compose
-
-Run the full stack for local testing with:
+Run the full stack with:
 
 ```bash
 docker compose up --build
 ```
 
-If the frontend looks stale after UI changes, restart the stack so Docker rebuilds the client image:
+Useful URLs:
 
-```bash
-docker compose down
-docker compose up --build -d
-```
-
-Services:
-
-- App UI: `http://localhost:8080`
+- app UI: `http://localhost:8080`
 - API: `http://localhost:4000`
 - PostgreSQL: `localhost:5432`
 
 Compose provisions:
 
-- a `postgres:16-alpine` database
+- PostgreSQL 16
 - the Node API container
-- an nginx-served frontend container that proxies `/api` to the server
-- named volumes for Postgres data and encrypted archive blobs
-- a 10 GB upload cap for large local archive testing, with uploads first written to disk instead of RAM
+- the Vite-built frontend served by nginx
+- a named volume for Postgres data
+- a named volume for encrypted blobs
 
-To stop and remove containers:
+## Environment Variables
 
-```bash
-docker compose down
-```
+Important configuration values:
 
-To also remove the local database/blob volumes:
+- `DATABASE_URL`: PostgreSQL connection string.
+- `APP_ORIGIN`: allowed browser origin for CORS.
+- `SESSION_SECRET`: used for HMAC-based session token hashing.
+- `ARCHIVE_ENCRYPTION_KEY`: 32-byte key for message and blob encryption.
+- `MAX_IMPORT_BYTES`: max accepted upload size, default 10 GB.
+- `UPLOAD_TMP_DIR`: temporary upload and large-import working directory.
+- `BLOB_DRIVER`: `local` or `s3`.
+- `BLOB_ROOT`: local root for encrypted blob storage when using `local`.
+- `S3_REGION`, `S3_BUCKET`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE`: S3-compatible storage configuration.
 
-```bash
-docker compose down -v
-```
+## Typical User Flow
 
-## Storage
+1. Register or log in.
+2. Set the “your name in WhatsApp” value in settings.
+3. Upload a `.txt` or `.zip` export from the import modal.
+4. Watch import progress as the worker processes the archive.
+5. Open a chat, browse messages, preview media, and search across the archive.
 
-- `BLOB_DRIVER=local` stores encrypted blobs under `BLOB_ROOT`.
-- `BLOB_DRIVER=s3` stores encrypted blobs in an S3-compatible bucket.
+## Where To Read Next
 
-## Important Environment Variables
-
-- `MAX_IMPORT_BYTES`
-  Default: `10737418240` (10 GB).
-- `UPLOAD_TMP_DIR`
-  Temporary disk location for uploaded archives before processing.
-- `ARCHIVE_ENCRYPTION_KEY`
-  Required 32-byte key used to encrypt message bodies and stored blobs.
-- `BLOB_DRIVER` / `BLOB_ROOT` / `S3_*`
-  Controls whether encrypted blobs are stored locally or in S3-compatible object storage.
-
-## Security
-
-- Passwords are hashed with Argon2id.
-- Sessions are opaque HTTP-only cookies backed by the database.
-- Message bodies and uploaded blobs are encrypted with `ARCHIVE_ENCRYPTION_KEY`.
+- [Tech stack](./docs/tech-stack.md) for repository structure, runtime layers, and key dependencies.
+- [Database schema](./docs/db-schema.md) for the relational model and table relationships.
+- [Import and processing pipeline](./docs/import-pipeline.md) for the end-to-end ingestion flow from upload to searchable archive.
