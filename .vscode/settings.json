@@ -1,0 +1,7 @@
+{
+    "java.jdt.ls.java.home": "/Users/joey/.local/share/mise/installs/java/temurin-21.0.10+7.0.LTS",
+    "debug.javascript.defaultRuntimeExecutable": {
+        "pwa-node": "/Users/joey/.local/share/mise/shims/node"
+    },
+    "python.defaultInterpreterPath": "/Users/joey/.local/share/mise/installs/python/3.14.4/bin/python"
+}
